@@ -49,8 +49,8 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone <your-repository-url>
-cd <repository-name>
+git clone https://github.com/xzzvsxd/Warp2Api_Plus
+cd Warp2Api_Plus-master
 ```
 
 ### 2. 安装依赖
