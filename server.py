@@ -10,9 +10,10 @@ from typing import Dict, Optional, Tuple
 import base64
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi import Query, HTTPException
@@ -218,19 +219,14 @@ def create_app() -> FastAPI:
     # 使用protobuf路由的应用作为主应用，并添加lifespan处理器
     app = FastAPI(lifespan=lifespan)
 
-    # 将protobuf路由包含到主应用中
-    app.mount("/", protobuf_app)
-
-    # 挂载输入 schema 清理中间件（覆盖 Warp 相关端点）
-
-    # 检查静态文件目录
+    # 检查静态文件目录并挂载
     static_dir = Path("static")
     if static_dir.exists():
         # 挂载静态文件服务
         app.mount("/static", StaticFiles(directory="static"), name="static")
         logger.info("✅ 静态文件服务已启用: /static")
 
-        # 添加根路径重定向到前端界面
+        # 添加GUI界面路由
         @app.get("/gui", response_class=HTMLResponse)
         async def serve_gui():
             """提供前端GUI界面"""
@@ -264,6 +260,73 @@ def create_app() -> FastAPI:
             </html>
             """
             )
+
+    # 将protobuf_app的路由包含进来（使用include_router而不是mount避免路径冲突）
+    # 注意：protobuf_app是FastAPI实例，需要通过router或重新定义路由
+    # 这里暂时保持mount方式，但确保WebSocket等关键路由在主app中定义
+    # 从protobuf_app导入WebSocket管理器和路由
+    from warp2protobuf.api.protobuf_routes import manager as ws_manager, app as proto_app
+    from fastapi import WebSocket, WebSocketDisconnect
+    
+    # 在主app中注册WebSocket路由
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket):
+        """WebSocket实时监控端点"""
+        await ws_manager.connect(websocket)
+        try:
+            await websocket.send_json({
+                "event": "connected",
+                "message": "WebSocket连接已建立",
+                "timestamp": datetime.now().isoformat()
+            })
+            # 发送最近的数据包历史
+            recent_packets = ws_manager.packet_history[-10:]
+            for packet in recent_packets:
+                await websocket.send_json({"event": "packet_history", "packet": packet})
+            # 保持连接
+            while True:
+                data = await websocket.receive_text()
+                logger.debug(f"收到WebSocket消息: {data}")
+        except WebSocketDisconnect:
+            ws_manager.disconnect(websocket)
+        except Exception as e:
+            logger.error(f"WebSocket错误: {e}")
+            ws_manager.disconnect(websocket)
+    
+    # 添加账号池API代理转发（避免跨域问题）
+    import httpx
+    import config
+    
+    @app.api_route("/api/pool/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def proxy_pool_api(path: str, request: Request):
+        """代理转发账号池API请求"""
+        pool_url = f"http://localhost:{config.POOL_SERVICE_PORT}/api/{path}"
+        
+        # 获取请求体
+        body = await request.body()
+        
+        # 转发请求
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.request(
+                    method=request.method,
+                    url=pool_url,
+                    content=body,
+                    headers=dict(request.headers),
+                    params=dict(request.query_params)
+                )
+                
+                return Response(
+                    content=response.content,
+                    status_code=response.status_code,
+                    headers=dict(response.headers)
+                )
+            except Exception as e:
+                logger.error(f"账号池API代理失败: {e}")
+                raise HTTPException(status_code=503, detail=f"Pool service unavailable: {str(e)}")
+    
+    # 将protobuf路由包含到主应用中
+    app.mount("/", protobuf_app)
 
     # ============= 返回protobuf编码后的AI请求字节 =============
     @app.post("/api/warp/encode_raw")

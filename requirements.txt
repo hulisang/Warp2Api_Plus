@@ -4,5 +4,8 @@ fastapi
 pydantic
 python-dotenv
 protobuf
+grpcio
+grpcio-tools
 aiosqlite
 fake-useragent
+requests

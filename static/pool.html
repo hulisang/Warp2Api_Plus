@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>账号池管理 - Warp2Api+</title>
+    <link rel="stylesheet" href="/static/css/brutalism.css">
+</head>
+<body>
+    <!-- 顶部标题栏 -->
+    <header class="brutal-header">
+        <div class="logo">
+            <span class="logo-icon">👥</span>
+            <h1>账号池管理</h1>
+        </div>
+        <div class="status-indicators">
+            <div class="status-badge" id="pool-status">
+                <span class="status-icon">●</span>
+                <span class="status-text">加载中...</span>
+            </div>
+            <a href="/gui" class="nav-link">返回监控</a>
+        </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="brutal-main">
+        <!-- 操作面板 -->
+        <section class="control-panel">
+            <button class="brutal-btn brutal-btn-primary" id="allocate-btn">
+                <span class="btn-icon">➕</span>
+                <span class="btn-text">分配账号</span>
+            </button>
+            <button class="brutal-btn" style="background: var(--brutal-green); color: var(--brutal-white);" id="add-account-btn">
+                <span class="btn-icon">🆕</span>
+                <span class="btn-text">添加账号</span>
+            </button>
+            <button class="brutal-btn" id="refresh-btn">
+                <span class="btn-icon">🔄</span>
+                <span class="btn-text">刷新状态</span>
+            </button>
+            <div class="search-group">
+                <input 
+                    type="text" 
+                    id="search-input" 
+                    class="brutal-input" 
+                    placeholder="搜索邮箱..."
+                >
+            </div>
+        </section>
+
+        <!-- 状态总览 -->
+        <section class="stats-panel">
+            <div class="stat-card">
+                <div class="stat-number" id="total-accounts">0</div>
+                <div class="stat-label">总账号数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="active-accounts">0</div>
+                <div class="stat-label">活跃账号</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="blocked-accounts">0</div>
+                <div class="stat-label">已封禁</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="active-sessions">0</div>
+                <div class="stat-label">活动会话</div>
+            </div>
+        </section>
+
+        <!-- 会话列表 -->
+        <section class="session-section">
+            <div class="section-header">
+                <h2 class="section-title">🔐 活动会话</h2>
+            </div>
+            <div class="session-container" id="session-container">
+                <div class="empty-state">
+                    <div class="empty-icon">🔒</div>
+                    <div class="empty-text">暂无活动会话</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 账号列表 -->
+        <section class="account-section">
+            <div class="section-header">
+                <h2 class="section-title">📋 账号列表</h2>
+                <div class="filter-tabs" id="status-filter">
+                    <button class="tab-btn active" data-status="all">全部</button>
+                    <button class="tab-btn" data-status="active">活跃</button>
+                    <button class="tab-btn" data-status="blocked">已封禁</button>
+                    <button class="tab-btn" data-status="locked">已锁定</button>
+                </div>
+            </div>
+            <div class="account-container" id="account-container">
+                <div class="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <div class="empty-text">加载账号中...</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 分配账号弹窗 -->
+        <div class="modal" id="allocate-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>分配账号</h3>
+                    <button class="modal-close" id="modal-close-allocate">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label class="brutal-label">账号数量</label>
+                        <input 
+                            type="number" 
+                            id="allocate-count" 
+                            class="brutal-input" 
+                            value="1" 
+                            min="1" 
+                            max="10"
+                        >
+                    </div>
+                    <div class="form-group">
+                        <label class="brutal-label">会话时长（秒）</label>
+                        <input 
+                            type="number" 
+                            id="session-duration" 
+                            class="brutal-input" 
+                            value="1800" 
+                            min="60"
+                        >
+                    </div>
+                    <button class="brutal-btn brutal-btn-primary full-width" id="confirm-allocate">
+                        <span class="btn-icon">✅</span>
+                        <span class="btn-text">确认分配</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 账号详情弹窗 -->
+        <div class="modal" id="account-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>账号详情</h3>
+                    <button class="modal-close" id="modal-close-account">✕</button>
+                </div>
+                <div class="modal-body" id="account-detail">
+                    <!-- 详情内容将动态插入 -->
+                </div>
+            </div>
+        </div>
+
+        <!-- 添加账号弹窗 -->
+        <div class="modal" id="add-account-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>🆕 智能添加账号</h3>
+                    <button class="modal-close" id="modal-close-add">✕</button>
+                </div>
+                <div class="modal-body">
+                    <!-- 步骤1：生成注册链接 -->
+                    <div id="step-1" style="display: block;">
+                        <div class="info-box">
+                            <h4>💡 使用说明</h4>
+                            <ol>
+                                <li>复制下方生成的注册链接</li>
+                                <li>在浏览器中打开链接</li>
+                                <li>输入您的邮箱地址</li>
+                                <li>从邮箱收到验证邮件</li>
+                                <li>复制邮件中的登录链接</li>
+                                <li>点击「下一步」继续</li>
+                            </ol>
+                        </div>
+                        <div class="form-group">
+                            <label class="brutal-label">🔗 注册链接</label>
+                            <textarea 
+                                id="signup-url-display" 
+                                class="brutal-textarea" 
+                                rows="3"
+                                readonly
+                                style="font-family: monospace; font-size: 12px; resize: none; margin-bottom: 10px;"
+                            ></textarea>
+                            <button 
+                                class="brutal-btn brutal-btn-secondary full-width" 
+                                id="copy-signup-url"
+                            >
+                                <span class="btn-icon">📋</span>
+                                <span class="btn-text">复制链接</span>
+                            </button>
+                        </div>
+                        <button class="brutal-btn brutal-btn-primary full-width" id="next-step-btn">
+                            <span class="btn-icon">➡️</span>
+                            <span class="btn-text">下一步</span>
+                        </button>
+                    </div>
+                    
+                    <!-- 步骤2：输入邮箱和登录链接 -->
+                    <div id="step-2" style="display: none;">
+                        <div class="info-box">
+                            <h4>💡 最后一步</h4>
+                            <ol>
+                                <li>输入您在Warp注册时使用的邮箱地址</li>
+                                <li>粘贴从邮件中复制的完整登录链接</li>
+                                <li>点击「确认添加」完成</li>
+                            </ol>
+                        </div>
+                        <div class="form-group">
+                            <label class="brutal-label">邮箱地址 *</label>
+                            <input 
+                                type="email" 
+                                id="add-email" 
+                                class="brutal-input" 
+                                placeholder="user@example.com"
+                                required
+                            >
+                        </div>
+                        <div class="form-group">
+                            <label class="brutal-label">登录链接 *</label>
+                            <textarea 
+                                id="add-login-link" 
+                                class="brutal-textarea" 
+                                placeholder="https://astral-field-294621.firebaseapp.com/__/auth/action?..."
+                                rows="3"
+                                required
+                            ></textarea>
+                            <small>从 Warp 验证邮件中复制完整登录链接</small>
+                        </div>
+                        <button class="brutal-btn brutal-btn-primary full-width" id="confirm-add-account" style="display: none;">
+                            <span class="btn-icon">✅</span>
+                            <span class="btn-text">确认添加</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="brutal-footer">
+        <div class="footer-info">
+            <span>Warp2Api+ v2.0</span>
+            <span>•</span>
+            <span>账号池管理</span>
+        </div>
+        <div class="footer-time" id="current-time"></div>
+    </footer>
+
+    <script src="/static/js/pool-manager.js"></script>
+</body>
+</html>

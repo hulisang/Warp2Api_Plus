@@ -3164,7 +3164,7 @@ class RegistrationMonitor:
         """启动监控器"""
 
         # 初始化Outlook客户端
-        await self.outlook_client._ensure_session()
+        await self.outlook_client._ensure_client()
 
         self.running = True
 

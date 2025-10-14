@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import aiosqlite
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +49,11 @@ class RefreshRequest(BaseModel):
 class BlockAccountRequest(BaseModel):
     jwt_token: Optional[str] = None
     email: Optional[str] = None
+
+
+class AddAccountFromLinkRequest(BaseModel):
+    email: str
+    login_link: str
 
 # ==================== 数据库优化器 ====================
 class DatabaseOptimizer:
@@ -504,6 +510,80 @@ async def get_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/accounts/list")
+async def list_accounts(
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """获取账号列表
+    
+    Args:
+        status: 账号状态过滤 (active/blocked/all)
+        limit: 每页数量
+        offset: 偏移量
+    """
+    try:
+        if not pool_manager:
+            raise HTTPException(status_code=503, detail="Service initializing")
+        
+        async with aiosqlite.connect(pool_manager.db_path, timeout=config.DB_TIMEOUT) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # 构建查询
+            where_clause = ""
+            if status and status != "all":
+                where_clause = f"WHERE status = '{status}'"
+            
+            # 查询总数
+            count_query = f"SELECT COUNT(*) as total FROM accounts {where_clause}"
+            cursor = await db.execute(count_query)
+            row = await cursor.fetchone()
+            total = row['total'] if row else 0
+            
+            # 查询账号列表
+            query = f"""
+                SELECT 
+                    email,
+                    local_id,
+                    status,
+                    last_used,
+                    created_at,
+                    proxy_info,
+                    user_agent
+                FROM accounts
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT {limit} OFFSET {offset}
+            """
+            
+            cursor = await db.execute(query)
+            rows = await cursor.fetchall()
+            
+            accounts = []
+            for row in rows:
+                account = dict(row)
+                # 检查是否被锁定
+                is_locked = account['email'] in pool_manager.locked_accounts
+                account['is_locked'] = is_locked
+                if is_locked:
+                    account['locked_by_session'] = pool_manager.locked_accounts[account['email']]
+                
+                accounts.append(account)
+            
+            return {
+                "success": True,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "accounts": accounts
+            }
+            
+    except Exception as e:
+        logger.error(f"获取账号列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/health")
 async def health_check():
     """健康检查"""
@@ -513,6 +593,90 @@ async def health_check():
         "cache_enabled": True,
         "optimized": True
     }
+
+
+@app.post("/api/accounts/add_from_link")
+async def add_account_from_link(request: AddAccountFromLinkRequest):
+    """从登录链接智能添加账号"""
+    try:
+        if not pool_manager:
+            raise HTTPException(status_code=503, detail="Service initializing")
+        
+        # 1. 解析登录链接获取oobCode
+        from urllib.parse import urlparse, parse_qs
+        parsed_url = urlparse(request.login_link)
+        query_params = parse_qs(parsed_url.query)
+        
+        oob_code = query_params.get('oobCode', [None])[0]
+        if not oob_code:
+            raise HTTPException(status_code=400, detail="Invalid login link: oobCode not found")
+        
+        logger.info(f"解析oobCode成功: {oob_code[:20]}...")
+        
+        # 2. 调用Firebase signInWithEmailLink API
+        firebase_api_key = config.FIREBASE_API_KEY
+        signin_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithEmailLink?key={firebase_api_key}"
+        
+        payload = {
+            "email": request.email,
+            "oobCode": oob_code
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(signin_url, json=payload)
+            
+            if response.status_code != 200:
+                error_detail = response.text
+                logger.error(f"Firebase登录失败: {error_detail}")
+                raise HTTPException(status_code=400, detail=f"Firebase login failed: {error_detail}")
+            
+            firebase_data = response.json()
+            logger.info(f"✅ Firebase登录成功: {request.email}")
+        
+        # 3. 提取需要的参数
+        local_id = firebase_data.get('localId')
+        id_token = firebase_data.get('idToken')
+        refresh_token = firebase_data.get('refreshToken')
+        
+        if not all([local_id, id_token, refresh_token]):
+            raise HTTPException(status_code=500, detail="Firebase response missing required fields")
+        
+        # 4. 添加到数据库
+        async with aiosqlite.connect(pool_manager.db_path, timeout=config.DB_TIMEOUT) as db:
+            try:
+                await db.execute(
+                    '''
+                    INSERT INTO accounts
+                    (email, local_id, id_token, refresh_token, status, created_at, last_used)
+                    VALUES (?, ?, ?, ?, 'active', ?, NULL)
+                    ''',
+                    (request.email, local_id, id_token, refresh_token, datetime.now().isoformat())
+                )
+                await db.commit()
+                
+                logger.info(f"✅ 账号已添加: {request.email}")
+                
+                # 刷新缓存
+                await pool_manager.refresh_account_cache()
+                
+                return {
+                    "success": True,
+                    "message": f"Account {request.email} added successfully",
+                    "account": {
+                        "email": request.email,
+                        "local_id": local_id,
+                        "status": "active"
+                    }
+                }
+                
+            except aiosqlite.IntegrityError:
+                raise HTTPException(status_code=400, detail=f"Account {request.email} already exists")
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"添加账号失败: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ==================== 主函数 ====================
@@ -532,13 +696,13 @@ async def main():
         return
 
     # 启动服务
-    config = uvicorn.Config(
+    server_config = uvicorn.Config(
         app=app,
         host=config.POOL_SERVICE_HOST,
         port=config.POOL_SERVICE_PORT,
         log_level=config.LOG_LEVEL.lower()
     )
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(server_config)
     await server.serve()
 
 

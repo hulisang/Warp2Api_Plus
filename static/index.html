@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Warp2Api+ 实时监控</title>
+    <link rel="stylesheet" href="/static/css/brutalism.css">
+</head>
+<body>
+    <!-- 顶部标题栏 -->
+    <header class="brutal-header">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <h1>WARP2API+</h1>
+        </div>
+        <div class="status-indicators">
+            <div class="status-badge" id="ws-status">
+                <span class="status-icon">●</span>
+                <span class="status-text">未连接</span>
+            </div>
+            <div class="connection-info" id="connection-count">0 连接</div>
+            <a href="/static/pool.html" class="nav-link">👥 账号池</a>
+        </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="brutal-main">
+        <!-- 控制面板 -->
+        <section class="control-panel">
+            <button class="brutal-btn brutal-btn-primary" id="connect-btn">
+                <span class="btn-icon">🔌</span>
+                <span class="btn-text">连接监控</span>
+            </button>
+            <button class="brutal-btn brutal-btn-danger" id="clear-btn">
+                <span class="btn-icon">🗑️</span>
+                <span class="btn-text">清空历史</span>
+            </button>
+            <div class="filter-group">
+                <label class="brutal-label">过滤类型</label>
+                <select class="brutal-select" id="filter-type">
+                    <option value="all">全部</option>
+                    <option value="packet_captured">数据包捕获</option>
+                    <option value="stream_chunk_parsed">流式解析</option>
+                    <option value="stream_completed">流式完成</option>
+                    <option value="connected">连接事件</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- 统计面板 -->
+        <section class="stats-panel">
+            <div class="stat-card">
+                <div class="stat-number" id="total-packets">0</div>
+                <div class="stat-label">总数据包</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="request-count">0</div>
+                <div class="stat-label">请求包</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="response-count">0</div>
+                <div class="stat-label">响应包</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="total-size">0 KB</div>
+                <div class="stat-label">总流量</div>
+            </div>
+        </section>
+
+        <!-- 实时日志流 -->
+        <section class="log-stream">
+            <div class="section-header">
+                <h2 class="section-title">📡 实时数据流</h2>
+                <div class="auto-scroll-toggle">
+                    <input type="checkbox" id="auto-scroll" checked>
+                    <label for="auto-scroll">自动滚动</label>
+                </div>
+            </div>
+            <div class="log-container" id="log-container">
+                <!-- 日志项将动态插入这里 -->
+                <div class="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <div class="empty-text">等待数据包...</div>
+                    <div class="empty-hint">点击"连接监控"开始</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 数据包详情弹窗 -->
+        <div class="modal" id="packet-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>数据包详情</h3>
+                    <button class="modal-close" id="modal-close">✕</button>
+                </div>
+                <div class="modal-body" id="modal-body">
+                    <!-- 详情内容将动态插入 -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="brutal-footer">
+        <div class="footer-info">
+            <span>Warp2Api+ v2.0</span>
+            <span>•</span>
+            <span>Protobuf实时监控</span>
+        </div>
+        <div class="footer-time" id="current-time"></div>
+    </footer>
+
+    <script src="/static/js/websocket.js"></script>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>
