@@ -297,29 +297,57 @@ def create_app() -> FastAPI:
     import httpx
     import config
     
-    @app.api_route("/api/pool/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    @app.api_route("/api/pool/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy_pool_api(path: str, request: Request):
         """代理转发账号池API请求"""
         pool_url = f"http://localhost:{config.POOL_SERVICE_PORT}/api/{path}"
-        
+
         # 获取请求体
         body = await request.body()
-        
+
+        # 过滤不安全或会干扰转发的请求头
+        incoming_headers = dict(request.headers)
+        hop_by_hop_headers = {
+            "host",
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "content-length",
+            "accept-encoding",
+        }
+        forward_headers = {
+            k: v for k, v in incoming_headers.items() if k.lower() not in hop_by_hop_headers
+        }
+
+        logger.info(f"➡️ 转发 {request.method} /api/pool/{path} -> {pool_url}")
+
         # 转发请求
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.request(
                     method=request.method,
                     url=pool_url,
-                    content=body,
-                    headers=dict(request.headers),
-                    params=dict(request.query_params)
+                    content=body if body else None,
+                    headers=forward_headers,
+                    params=dict(request.query_params),
+                    timeout=30.0,
                 )
-                
+
+                # 过滤返回头部中的hop-by-hop字段
+                response_headers = {
+                    k: v for k, v in response.headers.items() if k.lower() not in hop_by_hop_headers
+                }
+
                 return Response(
                     content=response.content,
                     status_code=response.status_code,
-                    headers=dict(response.headers)
+                    headers=response_headers,
+                    media_type=response.headers.get("content-type")
                 )
             except Exception as e:
                 logger.error(f"账号池API代理失败: {e}")

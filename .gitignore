@@ -10,3 +10,4 @@ __pycache__/
 .env.local
 .cursor/
 logs/
+warp_accounts.db
