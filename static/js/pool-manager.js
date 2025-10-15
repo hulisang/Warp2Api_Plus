@@ -60,6 +60,11 @@ class PoolManager {
             this.refreshAll();
         });
         
+        // 刷新Credits按钮
+        document.getElementById('refresh-credits-btn').addEventListener('click', () => {
+            this.refreshAllCredits();
+        });
+        
         // 搜索输入
         document.getElementById('search-input').addEventListener('input', (e) => {
             this.searchQuery = e.target.value.toLowerCase();
@@ -455,12 +460,47 @@ class PoolManager {
             new Date(account.last_used).toLocaleString('zh-CN') : '未使用';
         const createdAt = new Date(account.created_at).toLocaleString('zh-CN');
         
+        // Credits显示
+        let creditsHtml = '';
+        // 判断credits是否已更新（request_limit > 0 或 已有更新时间）
+        const hasCredits = account.request_limit > 0 || account.credits_updated_at;
+        
+        if (hasCredits) {
+            // 根据账号类型显示不同图标
+            const quotaIcon = 
+                account.quota_type === 'Pro' ? '🚀' : 
+                (account.quota_type === 'Pro_Trial' ? '🎉' : 
+                (account.quota_type === 'Free' ? '📋' : '❓'));
+            const updatedAt = account.credits_updated_at ? 
+                new Date(account.credits_updated_at).toLocaleString('zh-CN') : '未更新';
+            
+            creditsHtml = `
+                <div class="info-item credits-info">
+                    <div class="info-label">${quotaIcon} Credits</div>
+                    <div class="info-value">${account.requests_remaining || 0}/${account.request_limit || 0}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">额度类型</div>
+                    <div class="info-value">${account.quota_type || 'Free'}</div>
+                </div>
+            `;
+        } else {
+            // 未刷新过credits，显示提示
+            creditsHtml = `
+                <div class="info-item">
+                    <div class="info-label">💳 Credits</div>
+                    <div class="info-value" style="color: #999;">点击刷新获取</div>
+                </div>
+            `;
+        }
+        
         card.innerHTML = `
             <div class="account-header">
                 <div class="account-email">${account.email}</div>
                 <span class="status-tag ${statusClass}">${statusText}</span>
             </div>
             <div class="account-info">
+                ${creditsHtml}
                 <div class="info-item">
                     <div class="info-label">最后使用</div>
                     <div class="info-value">${lastUsed}</div>
@@ -478,6 +518,9 @@ class PoolManager {
             </div>
             <div class="action-buttons">
                 ${account.status === 'active' && !account.is_locked ? `
+                    <button class="action-btn" onclick="poolManager.refreshAccountCredits('${account.email}')" title="刷新Credits" style="background: var(--brutal-blue); color: white;">
+                        🔄 Credits
+                    </button>
                     <button class="action-btn danger" onclick="poolManager.markAccountBlocked('${account.email}')">
                         标记封禁
                     </button>
@@ -492,6 +535,92 @@ class PoolManager {
     }
     
     /**
+     * 批量刷新所有账号Credits
+     */
+    async refreshAllCredits() {
+        if (!confirm('确定要刷新所有active账号的Credits吗？')) {
+            return;
+        }
+        
+        try {
+            this.showNotification('正在刷新所有账号Credits...', 'info');
+            
+            const response = await fetch(`${this.poolApiBase}/accounts/refresh_credits`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({})  // 空请求表示刷新所有
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || `HTTP ${response.status}`);
+            }
+            
+            const data = await response.json();
+            console.log('✅ 批量Credits刷新成功:', data);
+            
+            this.showNotification(
+                `刷新完成! 成功: ${data.success_count}/${data.total}`,
+                'success'
+            );
+            
+            // 刷新显示
+            await this.filterAndRenderAccounts();
+            
+        } catch (error) {
+            console.error('批量刷新Credits失败:', error);
+            this.showNotification('刷新失败: ' + error.message, 'error');
+        }
+    }
+    
+    /**
+     * 刷新单个账号Credits
+     */
+    async refreshAccountCredits(email) {
+        try {
+            this.showNotification(`正在刷新 ${email} 的Credits...`, 'info');
+            
+            const response = await fetch(`${this.poolApiBase}/accounts/refresh_credits`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ email: email })
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || `HTTP ${response.status}`);
+            }
+            
+            const data = await response.json();
+            console.log('✅ Credits刷新成功:', data);
+            
+            if (data.results && data.results[0]) {
+                const result = data.results[0];
+                if (result.success) {
+                    const credits = result.credits;
+                    this.showNotification(
+                        `刷新成功! 剩余: ${credits.requests_remaining}/${credits.request_limit}`,
+                        'success'
+                    );
+                } else {
+                    this.showNotification(`刷新失败: ${result.error}`, 'error');
+                }
+            }
+            
+            // 刷新显示
+            await this.filterAndRenderAccounts();
+            
+        } catch (error) {
+            console.error('刷新Credits失败:', error);
+            this.showNotification('刷新失败: ' + error.message, 'error');
+        }
+    }
+    
+    /**
      * 显示账号详情
      */
     showAccountDetail(email) {
@@ -500,6 +629,54 @@ class PoolManager {
         
         const modal = document.getElementById('account-modal');
         const detailContainer = document.getElementById('account-detail');
+        
+        // Credits详情
+        let creditsDetailHtml = '';
+        if (account.request_limit !== undefined && account.request_limit !== null) {
+            // 根据账号类型显示不同图标
+            const quotaIcon = 
+                account.quota_type === 'Pro' ? '🚀' : 
+                (account.quota_type === 'Pro_Trial' ? '🎉' : 
+                (account.quota_type === 'Free' ? '📋' : '❓'));
+            const updatedAt = account.credits_updated_at ? 
+                new Date(account.credits_updated_at).toLocaleString('zh-CN') : '未更新';
+            const nextRefresh = account.next_refresh_time ? 
+                new Date(account.next_refresh_time).toLocaleString('zh-CN') : 'N/A';
+            
+            creditsDetailHtml = `
+                <div class="info-section">
+                    <h4>${quotaIcon} Credits 信息</h4>
+                    <div class="info-item">
+                        <div class="info-label">额度类型</div>
+                        <div class="info-value">${account.quota_type || 'Free'}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">总额度</div>
+                        <div class="info-value">${account.request_limit || 0}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">已使用</div>
+                        <div class="info-value">${account.requests_used || 0}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">剩余</div>
+                        <div class="info-value">${account.requests_remaining || 0}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">刷新周期</div>
+                        <div class="info-value">${account.refresh_duration || 'WEEKLY'}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">下次刷新</div>
+                        <div class="info-value">${nextRefresh}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">更新时间</div>
+                        <div class="info-value">${updatedAt}</div>
+                    </div>
+                </div>
+            `;
+        }
         
         detailContainer.innerHTML = `
             <div class="info-item">
@@ -518,6 +695,7 @@ class PoolManager {
                 <div class="info-label">是否锁定</div>
                 <div class="info-value">${account.is_locked ? '是' : '否'}</div>
             </div>
+            ${creditsDetailHtml}
             ${account.proxy_info ? `
                 <div class="info-item">
                     <div class="info-label">代理信息</div>
@@ -640,10 +818,41 @@ class PoolManager {
             return;
         }
         
-        // 验证是否包含oobCode
-        if (!loginLink.includes('oobCode')) {
-            this.showNotification('登录链接不包含 oobCode，请确认链接是否正确', 'error');
+        // 检测链接类型并给出提示
+        const isWarpLink = loginLink.startsWith('warp://');
+        const isEmailLink = loginLink.includes('oobCode');
+        
+        if (!isWarpLink && !isEmailLink) {
+            this.showNotification('无效的链接格式。请提供邮箱登录链接或 warp:// 客户端链接', 'error');
             return;
+        }
+        
+        // 如果是邮箱链接，显示友好提示
+        if (isEmailLink && !isWarpLink) {
+            const userConfirm = confirm(
+                '⚠️ 检测到您使用的是邮箱登录链接\n\n' +
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                '重要提示：\n\n' +
+                '❌ 邮箱链接限制：\n' +
+                '   • 一次性使用，访问后立即失效\n' +
+                '   • 需要额外步骤才能刷新Credits\n' +
+                '   • 添加后必须先在浏览器访问完成初始化\n\n' +
+                '✅ 推荐做法：\n' +
+                '   1. 在浏览器中打开邮箱链接\n' +
+                '   2. 点击 "Take me to Warp" 按钮\n' +
+                '   3. 复制跳转的 warp:// 开头链接\n' +
+                '   4. 使用 warp:// 链接添加账号\n\n' +
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                '💡 warp:// 链接优势：\n' +
+                '   ✓ 账号已完成初始化\n' +
+                '   ✓ 可立即刷新Credits\n' +
+                '   ✓ 无需额外操作\n\n' +
+                '是否仍要使用邮箱链接添加？'
+            );
+            
+            if (!userConfirm) {
+                return;
+            }
         }
         
         try {

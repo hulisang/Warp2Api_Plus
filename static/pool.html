@@ -38,6 +38,10 @@
                 <span class="btn-icon">🔄</span>
                 <span class="btn-text">刷新状态</span>
             </button>
+            <button class="brutal-btn" style="background: var(--brutal-blue); color: var(--brutal-white);" id="refresh-credits-btn">
+                <span class="btn-icon">💳</span>
+                <span class="btn-text">刷新Credits</span>
+            </button>
             <div class="search-group">
                 <input 
                     type="text" 
@@ -167,9 +171,12 @@
                                 <li>在浏览器中打开链接</li>
                                 <li>输入您的邮箱地址</li>
                                 <li>从邮箱收到验证邮件</li>
-                                <li>复制邮件中的登录链接</li>
+                                <li><strong>重要：</strong>点击邮件中的登录链接</li>
+                                <li>浏览器会跳转到 <code>warp://</code> 协议链接</li>
+                                <li>复制完整的 <code>warp://auth/desktop_redirect?...</code> 链接</li>
                                 <li>点击「下一步」继续</li>
                             </ol>
+                            <p><small>💡 提示：warp:// 链接包含已初始化的账号信息，推荐使用</small></p>
                         </div>
                         <div class="form-group">
                             <label class="brutal-label">🔗 注册链接</label>
@@ -198,11 +205,12 @@
                     <div id="step-2" style="display: none;">
                         <div class="info-box">
                             <h4>💡 最后一步</h4>
+                            <p><strong>支持两种链接：</strong></p>
                             <ol>
-                                <li>输入您在Warp注册时使用的邮箱地址</li>
-                                <li>粘贴从邮件中复制的完整登录链接</li>
-                                <li>点击「确认添加」完成</li>
+                                <li><strong>邮箱登录链接</strong> (一次性，需先访问初始化)</li>
+                                <li><strong>客户端重定向链接</strong> (推荐，以 warp:// 开头)</li>
                             </ol>
+                            <p><small>访问邮箱链接后，会自动跳转到客户端重定向链接，复制该链接即可</small></p>
                         </div>
                         <div class="form-group">
                             <label class="brutal-label">邮箱地址 *</label>
@@ -219,11 +227,11 @@
                             <textarea 
                                 id="add-login-link" 
                                 class="brutal-textarea" 
-                                placeholder="https://astral-field-294621.firebaseapp.com/__/auth/action?..."
-                                rows="3"
+                                placeholder="邮箱链接: https://astral-field-294621.firebaseapp.com/__/auth/action?...&#10;或&#10;客户端链接: warp://auth/desktop_redirect?refresh_token=..."
+                                rows="4"
                                 required
                             ></textarea>
-                            <small>从 Warp 验证邮件中复制完整登录链接</small>
+                            <small>支持邮箱登录链接或 warp:// 客户端重定向链接</small>
                         </div>
                         <button class="brutal-btn brutal-btn-primary full-width" id="confirm-add-account" style="display: none;">
                             <span class="btn-icon">✅</span>

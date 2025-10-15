@@ -53,7 +53,221 @@ class BlockAccountRequest(BaseModel):
 
 class AddAccountFromLinkRequest(BaseModel):
     email: str
-    login_link: str
+    login_link: str  # 支持邮箱链接或客户端重定向链接
+
+
+class RefreshCreditsRequest(BaseModel):
+    email: Optional[str] = None  # 为空则刷新所有账号
+
+# ==================== Credits查询服务 ====================
+class WarpCreditsService:
+    """Warp账号Credits查询服务"""
+    
+    GRAPHQL_URL = "https://app.warp.dev/graphql/v2"
+    FIREBASE_REFRESH_URL = "https://securetoken.googleapis.com/v1/token"
+    WARP_CLIENT_VERSION = "v0.2025.10.08.08.12.stable_05"
+    
+    # GraphQL查询
+    QUERY = """query GetRequestLimitInfo($requestContext: RequestContext!) {
+  user(requestContext: $requestContext) {
+    __typename
+    ... on UserOutput {
+      user {
+        requestLimitInfo {
+          isUnlimited
+          nextRefreshTime
+          requestLimit
+          requestsUsedSinceLastRefresh
+          requestLimitRefreshDuration
+          isUnlimitedAutosuggestions
+          acceptedAutosuggestionsLimit
+          acceptedAutosuggestionsSinceLastRefresh
+          isUnlimitedVoice
+          voiceRequestLimit
+          voiceRequestsUsedSinceLastRefresh
+          voiceTokenLimit
+          voiceTokensUsedSinceLastRefresh
+          isUnlimitedCodebaseIndices
+          maxCodebaseIndices
+          maxFilesPerRepo
+          embeddingGenerationBatchSize
+          requestLimitPooling
+        }
+      }
+    }
+    ... on UserFacingError {
+      error {
+        __typename
+        ... on SharedObjectsLimitExceeded {
+          limit
+          objectType
+          message
+        }
+        ... on PersonalObjectsLimitExceeded {
+          limit
+          objectType
+          message
+        }
+        ... on AccountDelinquencyError {
+          message
+        }
+        ... on GenericStringObjectUniqueKeyConflict {
+          message
+        }
+      }
+      responseContext {
+        serverVersion
+      }
+    }
+  }
+}
+"""
+    
+    def __init__(self, proxy: Optional[str] = None):
+        """初始化Credits服务"""
+        self.proxy = proxy
+    
+    async def refresh_id_token(self, refresh_token: str) -> Optional[str]:
+        """使用refresh_token刷新id_token"""
+        try:
+            logger.info(f"🔄 尝试刷新Token: refresh_token={refresh_token[:20]}...")
+            
+            client_kwargs = {"timeout": 30.0}
+            if self.proxy:
+                client_kwargs["proxy"] = self.proxy
+                logger.info(f"🌐 使用代理: {self.proxy}")
+            
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.post(
+                    self.FIREBASE_REFRESH_URL,
+                    params={"key": config.FIREBASE_API_KEY},
+                    json={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token
+                    }
+                )
+                
+                logger.info(f"📡 Firebase响应: HTTP {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    new_id_token = data.get("id_token")
+                    new_refresh_token = data.get("refresh_token")
+                    
+                    if new_id_token:
+                        logger.info(f"✅ Token刷新成功: {new_id_token[:30]}...")
+                        return new_id_token
+                    else:
+                        logger.error("❌ 响应中未找到id_token")
+                        return None
+                else:
+                    error_text = response.text[:200]
+                    logger.error(f"❌ 刷新Token失败: HTTP {response.status_code}, 错误: {error_text}")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ 刷新Token异常: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+    
+    async def get_credits(self, id_token: str) -> Dict[str, Any]:
+        """获取账号credits信息"""
+        if not id_token:
+            return {"success": False, "error": "缺少ID Token"}
+        
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "authorization": f"Bearer {id_token}",
+                "x-warp-client-id": "warp-app",
+                "x-warp-client-version": self.WARP_CLIENT_VERSION,
+                "x-warp-os-category": "Windows",
+                "x-warp-os-name": "Windows",
+                "x-warp-os-version": "11 (26100)",
+                "accept": "*/*",
+                "accept-encoding": "gzip, br"
+            }
+            
+            payload = {
+                "operationName": "GetRequestLimitInfo",
+                "variables": {
+                    "requestContext": {
+                        "clientContext": {"version": self.WARP_CLIENT_VERSION},
+                        "osContext": {
+                            "category": "Windows",
+                            "linuxKernelVersion": None,
+                            "name": "Windows",
+                            "version": "11 (26100)"
+                        }
+                    }
+                },
+                "query": self.QUERY
+            }
+            
+            # 构建httpx客户端参数
+            client_kwargs = {"timeout": 30.0}
+            if self.proxy:
+                # httpx使用proxy参数而不是proxies
+                client_kwargs["proxy"] = self.proxy
+            
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.post(
+                    self.GRAPHQL_URL,
+                    params={"op": "GetRequestLimitInfo"},
+                    json=payload,
+                    headers=headers
+                )
+                
+                if response.status_code != 200:
+                    return {"success": False, "error": f"HTTP {response.status_code}"}
+                
+                result = response.json()
+                
+                if "errors" in result:
+                    return {"success": False, "error": result["errors"][0].get("message", "Unknown error")}
+                
+                data = result.get("data", {})
+                user_data = data.get("user", {})
+                
+                if user_data.get("__typename") == "UserOutput":
+                    request_limit_info = user_data.get("user", {}).get("requestLimitInfo", {})
+                    
+                    request_limit = request_limit_info.get("requestLimit", 0)
+                    requests_used = request_limit_info.get("requestsUsedSinceLastRefresh", 0)
+                    is_unlimited = request_limit_info.get("isUnlimited", False)
+                    
+                    # 根据Warp官方的额度规则判断账号类型
+                    if is_unlimited:
+                        quota_type = "Pro"  # 付费专业版（无限额度）
+                    elif request_limit >= 2500:
+                        quota_type = "Pro_Trial"  # Pro试用版（2500额度）
+                    elif request_limit >= 150:
+                        quota_type = "Free"  # 免费版（150额度）
+                    else:
+                        quota_type = "Unknown"  # 未知类型
+                    
+                    return {
+                        "success": True,
+                        "request_limit": request_limit,
+                        "requests_used": requests_used,
+                        "requests_remaining": request_limit - requests_used,
+                        "is_unlimited": is_unlimited,
+                        "quota_type": quota_type,
+                        "next_refresh_time": request_limit_info.get("nextRefreshTime"),
+                        "refresh_duration": request_limit_info.get("requestLimitRefreshDuration", "WEEKLY"),
+                        "updated_at": datetime.now().isoformat()
+                    }
+                elif user_data.get("__typename") == "UserFacingError":
+                    return {"success": False, "error": user_data.get("error", {}).get("message", "Unknown error")}
+                else:
+                    return {"success": False, "error": "未找到用户信息"}
+        
+        except httpx.TimeoutException:
+            return {"success": False, "error": "请求超时"}
+        except Exception as e:
+            logger.error(f"获取credits失败: {e}")
+            return {"success": False, "error": str(e)}
+
 
 # ==================== 数据库优化器 ====================
 class DatabaseOptimizer:
@@ -103,6 +317,7 @@ class AccountPoolManager:
         self.account_cache: List[Dict] = []  # 账号缓存
         self.cache_updated_at = 0
         self.cache_ttl = 30  # 缓存有效期30秒
+        self.credits_service = WarpCreditsService(proxy=config.PROXY_URL)  # Credits查询服务
 
     async def init_async(self):
         """异步初始化"""
@@ -129,7 +344,10 @@ class AccountPoolManager:
                                                  user_agent,
                                                  email_password,
                                                  last_used,
-                                                 created_at
+                                                 created_at,
+                                                 request_limit,
+                                                 requests_remaining,
+                                                 quota_type
                                           FROM accounts
                                           WHERE status = 'active'
                                           ORDER BY COALESCE(last_used, created_at) ASC
@@ -382,6 +600,160 @@ class AccountPoolManager:
                 logger.info(f"清理过期会话: {session_id}")
         except Exception as e:
             logger.error(f"清理会话失败: {e}")
+    
+    async def update_account_credits(self, email: str, credits_data: Dict[str, Any]) -> bool:
+        """更新账号credits信息到数据库"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=config.DB_TIMEOUT) as db:
+                await db.execute(
+                    '''
+                    UPDATE accounts 
+                    SET request_limit = ?,
+                        requests_used = ?,
+                        requests_remaining = ?,
+                        is_unlimited = ?,
+                        quota_type = ?,
+                        next_refresh_time = ?,
+                        refresh_duration = ?,
+                        credits_updated_at = ?
+                    WHERE email = ?
+                    ''',
+                    (
+                        credits_data.get('request_limit', 0),
+                        credits_data.get('requests_used', 0),
+                        credits_data.get('requests_remaining', 0),
+                        1 if credits_data.get('is_unlimited') else 0,
+                        credits_data.get('quota_type', 'normal'),
+                        credits_data.get('next_refresh_time'),
+                        credits_data.get('refresh_duration', 'WEEKLY'),
+                        credits_data.get('updated_at'),
+                        email
+                    )
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"更新credits失败 {email}: {e}")
+            return False
+    
+    async def refresh_credits(self, email: Optional[str] = None) -> Dict[str, Any]:
+        """刷新账号credits"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=config.DB_TIMEOUT) as db:
+                db.row_factory = aiosqlite.Row
+                
+                if email:
+                    # 刷新单个账号
+                    cursor = await db.execute(
+                        'SELECT email, id_token, refresh_token FROM accounts WHERE email = ? AND status = "active"',
+                        (email,)
+                    )
+                    row = await cursor.fetchone()
+                    accounts = [dict(row)] if row else []
+                else:
+                    # 刷新所有active账号
+                    cursor = await db.execute(
+                        'SELECT email, id_token, refresh_token FROM accounts WHERE status = "active"'
+                    )
+                    rows = await cursor.fetchall()
+                    accounts = [dict(row) for row in rows]
+                
+                if not accounts:
+                    return {"success": False, "message": "未找到账号"}
+                
+                results = []
+                success_count = 0
+                
+                for account in accounts:
+                    acc_email = account['email']
+                    id_token = account['id_token']
+                    refresh_token = account['refresh_token']
+                    
+                    logger.info(f"刷新credits: {acc_email}")
+                    
+                    # 先尝试用现有token获取credits
+                    credits_data = await self.credits_service.get_credits(id_token)
+                    
+                    # 记录错误信息用于调试
+                    if not credits_data['success']:
+                        error_msg = credits_data.get('error', '')
+                        logger.warning(f"⚠️ 第一次尝试失败 {acc_email}: {error_msg}")
+                        
+                        # 判断是否是认证错误（放宽匹配条件）
+                        is_auth_error = any(keyword in error_msg for keyword in [
+                            'Unauthorized', 'User not in context', 'Not found', 
+                            'Authentication', 'Invalid token', 'Token expired'
+                        ])
+                        
+                        if is_auth_error:
+                            logger.info(f"🔄 检测到认证错误，尝试刷新Token: {acc_email}")
+                            
+                            # 刷新token
+                            new_id_token = await self.credits_service.refresh_id_token(refresh_token)
+                            
+                            if new_id_token:
+                                logger.info(f"✅ Token刷新成功，更新数据库: {acc_email}")
+                                
+                                # 更新数据库中的id_token
+                                await db.execute(
+                                    'UPDATE accounts SET id_token = ? WHERE email = ?',
+                                    (new_id_token, acc_email)
+                                )
+                                await db.commit()
+                                
+                                # 用新token重试
+                                logger.info(f"🔁 使用新Token重试获取Credits: {acc_email}")
+                                credits_data = await self.credits_service.get_credits(new_id_token)
+                                
+                                if credits_data['success']:
+                                    logger.info(f"🎉 重试成功: {acc_email}")
+                                else:
+                                    logger.error(f"❌ 重试仍然失败: {acc_email} - {credits_data.get('error')}")
+                            else:
+                                logger.error(f"❌ Token刷新失败: {acc_email}")
+                                credits_data = {'success': False, 'error': '刷新Token失败'}
+                        else:
+                            logger.error(f"❌ 非认证错误，不刷新Token: {error_msg}")
+                    
+                    if credits_data['success']:
+                        # 更新数据库
+                        await self.update_account_credits(acc_email, credits_data)
+                        success_count += 1
+                        
+                        results.append({
+                            "email": acc_email,
+                            "success": True,
+                            "credits": {
+                                "request_limit": credits_data['request_limit'],
+                                "requests_remaining": credits_data['requests_remaining'],
+                                "quota_type": credits_data['quota_type']
+                            }
+                        })
+                    else:
+                        results.append({
+                            "email": acc_email,
+                            "success": False,
+                            "error": credits_data.get('error')
+                        })
+                    
+                    # 避免请求过快
+                    if len(accounts) > 1:
+                        await asyncio.sleep(1)
+                
+                # 刷新缓存
+                await self.refresh_account_cache()
+                
+                return {
+                    "success": True,
+                    "message": f"刷新完成: {success_count}/{len(accounts)}",
+                    "total": len(accounts),
+                    "success_count": success_count,
+                    "results": results
+                }
+                
+        except Exception as e:
+            logger.error(f"刷新credits失败: {e}")
+            return {"success": False, "message": str(e)}
 
 
 # ==================== FastAPI应用 ====================
@@ -414,6 +786,8 @@ async def startup_event():
 
     # 启动定期任务
     async def periodic_tasks():
+        credits_refresh_counter = 0  # credits刷新计数器
+        
         while True:
             await asyncio.sleep(60)  # 每分钟执行一次
             try:
@@ -421,6 +795,13 @@ async def startup_event():
                 await pool_manager.cleanup_expired_sessions()
                 # 刷新缓存
                 await pool_manager.refresh_account_cache()
+                
+                # 每30分钟刷新一次credits
+                credits_refresh_counter += 1
+                if credits_refresh_counter >= 30:
+                    logger.info("开始定时刷新账号credits...")
+                    asyncio.create_task(pool_manager.refresh_credits())  # 异步执行，不阻塞
+                    credits_refresh_counter = 0
             except Exception as e:
                 logger.error(f"定期任务执行失败: {e}")
 
@@ -550,7 +931,15 @@ async def list_accounts(
                     last_used,
                     created_at,
                     proxy_info,
-                    user_agent
+                    user_agent,
+                    request_limit,
+                    requests_used,
+                    requests_remaining,
+                    is_unlimited,
+                    quota_type,
+                    next_refresh_time,
+                    refresh_duration,
+                    credits_updated_at
                 FROM accounts
                 {where_clause}
                 ORDER BY created_at DESC
@@ -595,51 +984,111 @@ async def health_check():
     }
 
 
-@app.post("/api/accounts/add_from_link")
-async def add_account_from_link(request: AddAccountFromLinkRequest):
-    """从登录链接智能添加账号"""
+@app.post("/api/accounts/refresh_credits")
+async def refresh_credits(request: RefreshCreditsRequest):
+    """刷新账号credits"""
     try:
         if not pool_manager:
             raise HTTPException(status_code=503, detail="Service initializing")
         
-        # 1. 解析登录链接获取oobCode
+        result = await pool_manager.refresh_credits(email=request.email)
+        
+        if not result['success']:
+            raise HTTPException(status_code=400, detail=result.get('message', 'Failed to refresh credits'))
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"刷新credits失败: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/accounts/add_from_link")
+async def add_account_from_link(request: AddAccountFromLinkRequest):
+    """从登录链接智能添加账号（支持邮箱链接和客户端重定向链接）"""
+    try:
+        if not pool_manager:
+            raise HTTPException(status_code=503, detail="Service initializing")
+        
         from urllib.parse import urlparse, parse_qs
         parsed_url = urlparse(request.login_link)
         query_params = parse_qs(parsed_url.query)
         
-        oob_code = query_params.get('oobCode', [None])[0]
-        if not oob_code:
-            raise HTTPException(status_code=400, detail="Invalid login link: oobCode not found")
+        # 判断链接类型
+        local_id = None
+        id_token = None
+        refresh_token = None
         
-        logger.info(f"解析oobCode成功: {oob_code[:20]}...")
-        
-        # 2. 调用Firebase signInWithEmailLink API
-        firebase_api_key = config.FIREBASE_API_KEY
-        signin_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithEmailLink?key={firebase_api_key}"
-        
-        payload = {
-            "email": request.email,
-            "oobCode": oob_code
-        }
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(signin_url, json=payload)
+        # 方式1: 客户端重定向链接 (warp://auth/desktop_redirect)
+        if parsed_url.scheme == 'warp' and 'refresh_token' in query_params:
+            logger.info(f"🔗 检测到客户端重定向链接")
             
-            if response.status_code != 200:
-                error_detail = response.text
-                logger.error(f"Firebase登录失败: {error_detail}")
-                raise HTTPException(status_code=400, detail=f"Firebase login failed: {error_detail}")
+            refresh_token = query_params.get('refresh_token', [None])[0]
+            user_uid = query_params.get('user_uid', [None])[0]
             
-            firebase_data = response.json()
-            logger.info(f"✅ Firebase登录成功: {request.email}")
+            if not refresh_token:
+                raise HTTPException(status_code=400, detail="Invalid client link: refresh_token not found")
+            
+            logger.info(f"✅ 提取refresh_token成功: {refresh_token[:30]}...")
+            logger.info(f"✅ 提取user_uid: {user_uid}")
+            
+            # 使用refresh_token换取id_token
+            logger.info("🔄 使用refresh_token获取id_token...")
+            new_id_token = await pool_manager.credits_service.refresh_id_token(refresh_token)
+            
+            if not new_id_token:
+                raise HTTPException(status_code=400, detail="Failed to get id_token from refresh_token")
+            
+            id_token = new_id_token
+            local_id = user_uid  # user_uid就是local_id
+            logger.info(f"✅ 获取id_token成功: {id_token[:30]}...")
         
-        # 3. 提取需要的参数
-        local_id = firebase_data.get('localId')
-        id_token = firebase_data.get('idToken')
-        refresh_token = firebase_data.get('refreshToken')
+        # 方式2: 邮箱链接 (包含oobCode)
+        elif 'oobCode' in query_params:
+            logger.info(f"📧 检测到邮箱登录链接")
+            
+            oob_code = query_params.get('oobCode', [None])[0]
+            if not oob_code:
+                raise HTTPException(status_code=400, detail="Invalid login link: oobCode not found")
+            
+            logger.info(f"解析oobCode成功: {oob_code[:20]}...")
+            
+            # 调用Firebase signInWithEmailLink API
+            firebase_api_key = config.FIREBASE_API_KEY
+            signin_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithEmailLink?key={firebase_api_key}"
+            
+            payload = {
+                "email": request.email,
+                "oobCode": oob_code
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(signin_url, json=payload)
+                
+                if response.status_code != 200:
+                    error_detail = response.text
+                    logger.error(f"Firebase登录失败: {error_detail}")
+                    raise HTTPException(status_code=400, detail=f"Firebase login failed: {error_detail}")
+                
+                firebase_data = response.json()
+                logger.info(f"✅ Firebase登录成功: {request.email}")
+            
+            # 提取参数
+            local_id = firebase_data.get('localId')
+            id_token = firebase_data.get('idToken')
+            refresh_token = firebase_data.get('refreshToken')
         
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid link format. Please provide either email login link or warp:// client redirect link"
+            )
+        
+        # 验证必需参数
         if not all([local_id, id_token, refresh_token]):
-            raise HTTPException(status_code=500, detail="Firebase response missing required fields")
+            raise HTTPException(status_code=500, detail="Missing required authentication fields")
         
         # 4. 添加到数据库
         async with aiosqlite.connect(pool_manager.db_path, timeout=config.DB_TIMEOUT) as db:
