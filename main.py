@@ -11,6 +11,7 @@ import os
 import importlib
 import logging
 import asyncio
+from pathlib import Path
 
 # 在导入项目模块之前，确保项目根目录在sys.path中
 # 这有助于解决在不同环境下模块导入失败的问题
@@ -26,6 +27,38 @@ logging.basicConfig(
     format=config.LOG_FORMAT
 )
 logger = logging.getLogger(__name__)
+
+
+# ==================== 数据库初始化检查 ====================
+
+def check_and_init_database():
+    """检查数据库是否存在，不存在则自动初始化"""
+    db_path = Path(config.DATABASE_PATH)
+
+    if db_path.exists():
+        logger.info(f"✅ 数据库已存在: {config.DATABASE_PATH}")
+        return True
+
+    logger.warning(f"⚠️  数据库不存在: {config.DATABASE_PATH}")
+    logger.info("🔨 开始自动初始化数据库...")
+
+    try:
+        # 导入初始化模块
+        init_db = importlib.import_module("init_database")
+
+        # 执行初始化
+        success = init_db.init_database(config.DATABASE_PATH, force=False)
+
+        if success:
+            logger.info("✅ 数据库初始化成功")
+            return True
+        else:
+            logger.error("❌ 数据库初始化失败")
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ 数据库初始化异常: {e}", exc_info=True)
+        return False
 
 
 # ==================== 服务启动函数 ====================
@@ -112,6 +145,20 @@ SERVICES = {
 
 def start_all_services():
     """启动所有服务"""
+    # 在启动服务前检查并初始化数据库
+    logger.info("=" * 60)
+    logger.info("🔍 检查数据库状态...")
+    logger.info("=" * 60)
+
+    if not check_and_init_database():
+        logger.error("❌ 数据库初始化失败，无法启动服务")
+        logger.error("请检查错误信息或手动运行: python init_database.py")
+        sys.exit(1)
+
+    logger.info("=" * 60)
+    logger.info("🚀 开始启动所有服务...")
+    logger.info("=" * 60)
+
     processes = []
     for name, target_func in SERVICES.items():
         process = multiprocessing.Process(target=target_func, name=f"Process-{name}")
