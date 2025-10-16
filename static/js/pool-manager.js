@@ -45,82 +45,67 @@ class PoolManager {
      * 绑定事件
      */
     bindEvents() {
-        // 分配按钮
-        document.getElementById('allocate-btn').addEventListener('click', () => {
-            this.showAllocateModal();
-        });
-        
         // 添加账号按钮
         document.getElementById('add-account-btn').addEventListener('click', () => {
             this.showAddAccountModal();
         });
-        
+
         // 刷新按钮
         document.getElementById('refresh-btn').addEventListener('click', () => {
             this.refreshAll();
         });
-        
+
         // 刷新Credits按钮
         document.getElementById('refresh-credits-btn').addEventListener('click', () => {
             this.refreshAllCredits();
         });
-        
+
         // 搜索输入
         document.getElementById('search-input').addEventListener('input', (e) => {
             this.searchQuery = e.target.value.toLowerCase();
             this.filterAndRenderAccounts();
         });
-        
+
         // 状态过滤标签
         document.querySelectorAll('#status-filter .tab-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 // 更新激活状态
                 document.querySelectorAll('#status-filter .tab-btn').forEach(b => b.classList.remove('active'));
                 e.target.classList.add('active');
-                
+
                 // 更新过滤器
                 this.currentFilter = e.target.dataset.status;
                 this.filterAndRenderAccounts();
             });
         });
-        
-        // 分配确认
-        document.getElementById('confirm-allocate').addEventListener('click', () => {
-            this.allocateAccounts();
-        });
-        
+
         // 模态弹窗关闭按钮
-        document.getElementById('modal-close-allocate').addEventListener('click', () => {
-            this.closeModal('allocate-modal');
-        });
-        
         document.getElementById('modal-close-account').addEventListener('click', () => {
             this.closeModal('account-modal');
         });
-        
+
         document.getElementById('modal-close-add').addEventListener('click', () => {
             this.closeModal('add-account-modal');
         });
-        
+
         // 添加账号确认
         document.getElementById('confirm-add-account').addEventListener('click', () => {
             this.addAccountFromLink();
         });
-        
+
         // 下一步按钮
         document.getElementById('next-step-btn').addEventListener('click', () => {
             this.showStep2();
         });
-        
+
         // 复制链接按钮
         document.getElementById('copy-signup-url').addEventListener('click', () => {
             this.copySignupUrl();
         });
-        
+
         // ESC键关闭模态弹窗
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
-                this.closeModal('allocate-modal');
                 this.closeModal('account-modal');
                 this.closeModal('add-account-modal');
             }
@@ -181,99 +166,6 @@ class PoolManager {
         document.getElementById('total-accounts').textContent = totalAccounts;
         document.getElementById('active-accounts').textContent = data.total_active || 0;
         document.getElementById('blocked-accounts').textContent = data.total_expired || 0; // expired用作封禁数
-        document.getElementById('active-sessions').textContent = data.active_sessions || 0;
-    }
-    
-    /**
-     * 分配账号
-     */
-    async allocateAccounts() {
-        const count = parseInt(document.getElementById('allocate-count').value);
-        const duration = parseInt(document.getElementById('session-duration').value);
-        
-        if (count < 1 || count > 10) {
-            this.showNotification('账号数量必须在1-10之间', 'error');
-            return;
-        }
-        
-        if (duration < 60) {
-            this.showNotification('会话时长至少60秒', 'error');
-            return;
-        }
-        
-        try {
-            const response = await fetch(`${this.poolApiBase}/accounts/allocate`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    count: count,
-                    session_duration: duration
-                })
-            });
-            
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.detail || `HTTP ${response.status}`);
-            }
-            
-            const data = await response.json();
-            
-            console.log('✅ 账号分配成功:', data);
-            this.showNotification(`成功分配 ${data.accounts.length} 个账号`, 'success');
-            
-            // 关闭模态弹窗
-            this.closeModal('allocate-modal');
-            
-            // 刷新数据
-            await this.refreshAll();
-            
-            // 显示分配结果
-            this.showAllocationResult(data);
-            
-        } catch (error) {
-            console.error('分配账号失败:', error);
-            this.showNotification('分配失败: ' + error.message, 'error');
-        }
-    }
-    
-    /**
-     * 释放会话
-     */
-    async releaseSession(sessionId) {
-        if (!confirm(`确定要释放会话 ${sessionId.substring(0, 8)}... 吗？`)) {
-            return;
-        }
-        
-        try {
-            const response = await fetch(`${this.poolApiBase}/accounts/release`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    session_id: sessionId
-                })
-            });
-            
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.detail || `HTTP ${response.status}`);
-            }
-            
-            const data = await response.json();
-            
-            console.log('✅ 会话释放成功:', data);
-            this.showNotification('会话已释放', 'success');
-            
-            // 刷新数据
-            await this.refreshAll();
-            
-        } catch (error) {
-            console.error('释放会话失败:', error);
-            this.showNotification('释放失败: ' + error.message, 'error');
-        }
     }
     
     /**
@@ -314,50 +206,7 @@ class PoolManager {
         }
     }
     
-    /**
-     * 显示分配结果
-     */
-    showAllocationResult(data) {
-        const { session_id, accounts, expires_at } = data;
-        
-        const container = document.getElementById('session-container');
-        
-        // 移除空状态
-        const emptyState = container.querySelector('.empty-state');
-        if (emptyState) {
-            emptyState.remove();
-        }
-        
-        // 创建会话卡片
-        const card = document.createElement('div');
-        card.className = 'session-card';
-        
-        const expiresDate = new Date(expires_at * 1000);
-        
-        card.innerHTML = `
-            <div class="session-header">
-                <div class="session-id">${session_id.substring(0, 16)}...</div>
-                <span class="status-tag">活动中</span>
-            </div>
-            <div class="session-info">
-                <div class="info-item">
-                    <div class="info-label">账号数量</div>
-                    <div class="info-value">${accounts.length}</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">过期时间</div>
-                    <div class="info-value">${expiresDate.toLocaleString('zh-CN')}</div>
-                </div>
-            </div>
-            <div class="action-buttons">
-                <button class="action-btn danger" onclick="poolManager.releaseSession('${session_id}')">
-                    释放会话
-                </button>
-            </div>
-        `;
-        
-        container.insertBefore(card, container.firstChild);
-    }
+
     
     /**
      * 加载账号列表
@@ -711,13 +560,6 @@ class PoolManager {
         `;
         
         modal.classList.add('active');
-    }
-    
-    /**
-     * 显示分配模态弹窗
-     */
-    showAllocateModal() {
-        document.getElementById('allocate-modal').classList.add('active');
     }
     
     /**

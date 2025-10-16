@@ -26,10 +26,6 @@
     <main class="brutal-main">
         <!-- 操作面板 -->
         <section class="control-panel">
-            <button class="brutal-btn brutal-btn-primary" id="allocate-btn">
-                <span class="btn-icon">➕</span>
-                <span class="btn-text">分配账号</span>
-            </button>
             <button class="brutal-btn" style="background: var(--brutal-green); color: var(--brutal-white);" id="add-account-btn">
                 <span class="btn-icon">🆕</span>
                 <span class="btn-text">添加账号</span>
@@ -43,10 +39,10 @@
                 <span class="btn-text">刷新Credits</span>
             </button>
             <div class="search-group">
-                <input 
-                    type="text" 
-                    id="search-input" 
-                    class="brutal-input" 
+                <input
+                    type="text"
+                    id="search-input"
+                    class="brutal-input"
                     placeholder="搜索邮箱..."
                 >
             </div>
@@ -65,23 +61,6 @@
             <div class="stat-card">
                 <div class="stat-number" id="blocked-accounts">0</div>
                 <div class="stat-label">已封禁</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-number" id="active-sessions">0</div>
-                <div class="stat-label">活动会话</div>
-            </div>
-        </section>
-
-        <!-- 会话列表 -->
-        <section class="session-section">
-            <div class="section-header">
-                <h2 class="section-title">🔐 活动会话</h2>
-            </div>
-            <div class="session-container" id="session-container">
-                <div class="empty-state">
-                    <div class="empty-icon">🔒</div>
-                    <div class="empty-text">暂无活动会话</div>
-                </div>
             </div>
         </section>
 
@@ -103,43 +82,6 @@
                 </div>
             </div>
         </section>
-
-        <!-- 分配账号弹窗 -->
-        <div class="modal" id="allocate-modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h3>分配账号</h3>
-                    <button class="modal-close" id="modal-close-allocate">✕</button>
-                </div>
-                <div class="modal-body">
-                    <div class="form-group">
-                        <label class="brutal-label">账号数量</label>
-                        <input 
-                            type="number" 
-                            id="allocate-count" 
-                            class="brutal-input" 
-                            value="1" 
-                            min="1" 
-                            max="10"
-                        >
-                    </div>
-                    <div class="form-group">
-                        <label class="brutal-label">会话时长（秒）</label>
-                        <input 
-                            type="number" 
-                            id="session-duration" 
-                            class="brutal-input" 
-                            value="1800" 
-                            min="60"
-                        >
-                    </div>
-                    <button class="brutal-btn brutal-btn-primary full-width" id="confirm-allocate">
-                        <span class="btn-icon">✅</span>
-                        <span class="btn-text">确认分配</span>
-                    </button>
-                </div>
-            </div>
-        </div>
 
         <!-- 账号详情弹窗 -->
         <div class="modal" id="account-modal">
