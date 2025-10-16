@@ -9,5 +9,6 @@ __pycache__/
 .vscode/
 .env.local
 .cursor/
+.augment/
 logs/
 warp_accounts.db
