@@ -39,15 +39,14 @@ logger = logging.getLogger(__name__)
 ua = UserAgent()
 
 
-# ==================== Outlook API客户端 ====================
-class OutlookAPIClient:
-    """Outlook API客户端"""
+# ==================== 临时邮箱API客户端 ====================
+class TempMailAPIClient:
+    """临时邮箱API客户端"""
 
-    def __init__(self, app_id: str, app_key: str):
-        self.app_id = app_id
-        self.app_key = app_key
-        self.base_url = config.OUTLOOK_BASE_URL
+    def __init__(self):
+        self.base_url = config.TEMP_MAIL_BASE_URL
         self.client = None
+        self.current_email = None
 
     async def __aenter__(self):
         await self._ensure_client()
@@ -61,8 +60,11 @@ class OutlookAPIClient:
             self.client = httpx.AsyncClient(
                 timeout=httpx.Timeout(30.0),
                 headers={
-                    'User-Agent': ua.random
-                }
+                    'User-Agent': ua.random,
+                    'Accept': 'application/json'
+                },
+                proxy=None,  # 禁用代理
+                trust_env=False  # 不使用环境变量中的代理设置
             )
 
     async def close(self):
@@ -70,26 +72,50 @@ class OutlookAPIClient:
             await self.client.aclose()
             self.client = None
 
-    async def get_email(self, commodity_id: int, num: int) -> Dict[str, Any]:
-        """提取邮箱"""
+    async def generate_email(self) -> Dict[str, Any]:
+        """生成临时邮箱"""
         await self._ensure_client()
 
-        url = f"{self.base_url}/getEmail.php"
-        params = {
-            'app_id': self.app_id,
-            'app_key': self.app_key,
-            'commodity_id': commodity_id,
-            'num': num
-        }
+        url = f"{self.base_url}/generate-email"
+
+        try:
+            response = await self.client.get(url)
+            response.raise_for_status()
+            result = response.json()
+            self.current_email = result.get('email')
+            logger.info(f"✅ 生成临时邮箱: {self.current_email}")
+            return {
+                "success": True,
+                "email": self.current_email
+            }
+        except Exception as e:
+            logger.error(f"生成邮箱失败: {type(e).__name__}: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    async def get_emails(self, email: str = None) -> Dict[str, Any]:
+        """获取邮件列表"""
+        await self._ensure_client()
+
+        target_email = email or self.current_email
+        if not target_email:
+            return {"success": False, "error": "未指定邮箱地址"}
+
+        url = f"{self.base_url}/get-emails"
+        params = {'email': target_email}
 
         try:
             response = await self.client.get(url, params=params)
             response.raise_for_status()
             result = response.json()
-            return result
+            emails = result.get('emails', [])
+            logger.info(f"获取到 {len(emails)} 封邮件")
+            return {
+                "success": True,
+                "emails": emails
+            }
         except Exception as e:
-            logger.error(f"获取邮箱失败: {e}")
-            return {"code": 500, "message": str(e), "data": None}
+            logger.error(f"获取邮件失败: {type(e).__name__}: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
 
 # ==================== 异步代理管理器 ====================
@@ -118,17 +144,26 @@ class AsyncProxyManager:
             return None
 
         try:
+            # 如果已经是完整的URL格式（http://或socks5://），直接返回
+            if proxy_str.startswith(('http://', 'https://', 'socks5://', 'socks4://')):
+                return proxy_str
+            
+            # 否则按照旧逻辑处理（兼容性）
             if '@' in proxy_str:
                 credentials, host_port = proxy_str.split('@')
                 user, password = credentials.split(':')
                 host, port = host_port.split(':')
-                # httpx使用socks5代理格式
                 return f"socks5://{user}:{password}@{host}:{port}"
             else:
-                host, port = proxy_str.split(':')
-                return f"socks5://{host}:{port}"
+                parts = proxy_str.split(':')
+                if len(parts) == 2:
+                    host, port = parts
+                    return f"socks5://{host}:{port}"
+                else:
+                    logger.error(f"代理格式无法识别: {proxy_str}")
+                    return None
         except Exception as e:
-            logger.error(f"格式化代理失败: {e}")
+            logger.error(f"格式化代理失败: {e}", exc_info=True)
             return None
 
 
@@ -140,18 +175,15 @@ class AsyncDatabaseManager:
         self.db_path = db_path
 
     async def add_account(self, email, local_id, id_token, refresh_token,
-                          email_password=None, client_id=None, outlook_refresh_token=None,
                           status='active', proxy_info=None, user_agent=None):
         """添加账号"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute('''
                                  INSERT INTO accounts
-                                 (email, email_password, local_id, id_token, refresh_token,
-                                  client_id, outlook_refresh_token, status, proxy_info, user_agent)
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                 ''', (email, email_password, local_id, id_token, refresh_token,
-                                       client_id, outlook_refresh_token, status, proxy_info, user_agent))
+                                 (email, local_id, id_token, refresh_token, status, proxy_info, user_agent)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                                 ''', (email, local_id, id_token, refresh_token, status, proxy_info, user_agent))
 
                 await db.commit()
                 logger.info(f"✅ 账号已保存: {email}")
@@ -237,37 +269,15 @@ class WarpRegistrationBot:
                     "error": "proxy_error"
                 }
             except Exception as e:
-                logger.error(f"发送登录请求异常: {e}")
+                logger.error(f"发送登录请求异常: {type(e).__name__}: {e}", exc_info=True)
                 return {
                     "success": False,
                     "error": str(e)
                 }
 
-    async def get_new_access_token(self, refresh_token: str, client_id: str) -> Optional[str]:
-        """刷新OAuth2访问令牌"""
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-                    data={
-                        'grant_type': 'refresh_token',
-                        'refresh_token': refresh_token,
-                        'client_id': client_id,
-                        'scope': 'https://graph.microsoft.com/.default'  # 添加Graph API scope
-                    }
-                )
-
-                if response.status_code == 200:
-                    return response.json().get('access_token')
-        except Exception as e:
-            logger.error(f"刷新token失败: {e}")
-
-        return None
-
-    async def wait_for_verification_email(self, access_token: str, email: str,
-                                          client_id: str, refresh_token: str,
-                                          timeout: int = 30) -> Optional[Dict[str, Any]]:
-        """等待Warp验证邮件（使用Microsoft Graph API）"""
+    async def wait_for_verification_email(self, temp_mail_client: TempMailAPIClient, email: str,
+                                          timeout: int = 60) -> Optional[Dict[str, Any]]:
+        """等待Warp验证邮件（使用TEMP_MAIL_API）"""
         logger.info(f"📬 等待验证邮件 (超时: {timeout}秒)...")
         await asyncio.sleep(3)
 
@@ -279,115 +289,50 @@ class WarpRegistrationBot:
             logger.info(f"  第 {check_count} 次检查...")
 
             try:
-                result = await self._check_email_graph(access_token)
+                result = await self._check_email_temp(temp_mail_client, email)
 
                 if result:
                     return result
 
             except Exception as e:
                 logger.warning(f"检查邮件时出错: {e}")
-                # 如果是认证错误，尝试刷新token
-                if "401" in str(e) or "Unauthorized" in str(e):
-                    new_token = await self.get_new_access_token(refresh_token, client_id)
-                    if new_token:
-                        access_token = new_token
-                        logger.info("access_token已刷新")
 
             await asyncio.sleep(5)
 
         logger.error("❌ 等待验证邮件超时")
         return None
 
-    async def _check_email_graph(self, access_token: str) -> Optional[Dict[str, Any]]:
-        """使用Graph API检查邮件（简化查询，避免InefficientFilter错误）"""
+    async def _check_email_temp(self, temp_mail_client: TempMailAPIClient, email: str) -> Optional[Dict[str, Any]]:
+        """使用TEMP_MAIL_API检查邮件"""
         try:
-            headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Content-Type': 'application/json',
-                'Prefer': 'outlook.body-content-type="html"'
-            }
+            logger.info(f"  正在检查邮箱: {email}")
+            result = await temp_mail_client.get_emails(email)
 
-            # 简化过滤条件，移除$orderby
-            filter_conditions = [
-                "contains(subject, 'Warp')",
-            ]
+            if not result.get('success'):
+                logger.warning(f"获取邮件失败: {result.get('error')}")
+                return None
 
-            async with httpx.AsyncClient(timeout=30) as client:
-                async def check_folder(endpoint_url: str) -> Optional[Dict[str, Any]]:
-                    for condition in filter_conditions:
-                        try:
-                            response = await client.get(
-                                endpoint_url,
-                                headers=headers,
-                                params={
-                                    '$filter': condition,
-                                    '$top': 10,  # 获取更多邮件以补偿无排序
-                                    # 移除 '$orderby': 'receivedDateTime desc',
-                                    '$select': 'id,subject,from,body,receivedDateTime'
-                                }
-                            )
+            emails = result.get('emails', [])
+            if not emails:
+                logger.info("  暂无邮件")
+                return None
 
-                            if response.status_code == 401:
-                                raise Exception("Unauthorized")
+            # 按日期排序，最新的在前
+            emails.sort(key=lambda x: x.get('date', ''), reverse=True)
 
-                            if response.status_code == 200:
-                                data = response.json()
-                                messages = data.get('value', [])
-
-                                # 在客户端按接收时间排序
-                                messages.sort(
-                                    key=lambda x: x.get('receivedDateTime', ''),
-                                    reverse=True
-                                )
-
-                                # 只检查最新的3封
-                                for message in messages[:3]:
-                                    body_content = message.get('body', {}).get('content', '')
-                                    verification_data = self._extract_verification_link(body_content)
-                                    if verification_data:
-                                        logger.info(f"✅ 使用条件 '{condition}' 找到验证邮件")
-                                        return verification_data
-                            else:
-                                logger.warning(
-                                    f"条件 '{condition}' 查询失败，状态码: {response.status_code}, 响应: {response.text}")
-
-                        except Exception as e:
-                            logger.warning(f"在检查条件 '{condition}' 时出错: {e}")
-                            if "Unauthorized" in str(e):
-                                raise
-                            continue
-                    return None
-
-                # 检查收件箱
-                logger.info("  正在检查收件箱...")
-                inbox_url = "https://graph.microsoft.com/v1.0/me/messages"
-                result = await check_folder(inbox_url)
-                if result:
-                    return result
-
-                # 检查垃圾邮件
-                logger.info("  正在检查垃圾邮件文件夹...")
-                try:
-                    folder_response = await client.get(
-                        "https://graph.microsoft.com/v1.0/me/mailFolders",
-                        headers=headers,
-                        params={'$filter': "displayName eq 'Junk Email'"}
-                    )
-                    if folder_response.status_code == 200:
-                        folders = folder_response.json().get('value', [])
-                        if folders:
-                            junk_folder_id = folders[0]['id']
-                            junk_url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{junk_folder_id}/messages"
-                            result = await check_folder(junk_url)
-                            if result:
-                                return result
-                except Exception as e:
-                    logger.warning(f"检查垃圾邮件文件夹出错: {e}")
+            # 检查最新的3封邮件
+            for email_data in emails[:3]:
+                subject = email_data.get('subject', '')
+                if 'warp' in subject.lower():
+                    # 优先使用HTML内容，其次是纯文本
+                    body_content = email_data.get('htmlContent') or email_data.get('content', '')
+                    verification_data = self._extract_verification_link(body_content)
+                    if verification_data:
+                        logger.info(f"✅ 找到验证邮件: {subject}")
+                        return verification_data
 
         except Exception as e:
-            logger.error(f"Graph API邮件检查失败: {e}")
-            if "Unauthorized" in str(e):
-                raise
+            logger.error(f"TEMP_MAIL_API邮件检查失败: {e}")
 
         return None
 
@@ -624,7 +569,7 @@ class WarpRegistrationBot:
                 "error": "proxy_error"
             }
         except Exception as e:
-            logger.error(f"登录异常: {e}")
+            logger.error(f"登录异常: {type(e).__name__}: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
@@ -707,7 +652,7 @@ class WarpRegistrationBot:
             logger.error(f"代理错误: {e}")
             return {"success": False, "error": "proxy_error"}
         except Exception as e:
-            logger.error(f"激活Warp用户失败: {e}")
+            logger.error(f"激活Warp用户失败: {type(e).__name__}: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
     async def _generate_worker_payload(self, session_id: str) -> Dict[str, Any]:
@@ -2477,7 +2422,7 @@ class WarpRegistrationBot:
                 return False
 
         except Exception as e:
-            logger.error(f"Worker请求失败: {e}")
+            logger.error(f"Worker请求失败: {type(e).__name__}: {e}", exc_info=True)
             return False
 
     async def _get_public_ip(self) -> str:
@@ -2591,12 +2536,16 @@ class WarpRegistrationBot:
             "a=rtpmap:123 red/90000", "a=rtpmap:127 ulpfec/90000"
         ]
 
-    async def register_account(self, email_info: Dict) -> Optional[str]:
+    async def register_account(self, temp_mail_client: TempMailAPIClient) -> Optional[str]:
         """执行完整的注册流程"""
-        email = email_info['email']
-        email_password = email_info.get('email_password')
-        client_id = email_info.get('client_id')
-        outlook_refresh_token = email_info.get('refresh_token')
+        # 生成临时邮箱
+        email_result = await temp_mail_client.generate_email()
+        if not email_result.get('success'):
+            logger.error(f"生成邮箱失败: {email_result.get('error')}")
+            return None
+        
+        email = email_result['email']
+        logger.info(f"✅ 使用邮箱: {email}")
 
         # 尝试多个代理
         for proxy_attempt in range(config.MAX_PROXY_RETRIES):
@@ -2637,14 +2586,7 @@ class WarpRegistrationBot:
                 #  Verisoul 验证流程结束，现在 session_id 是合法的了
                 # =========================================================
 
-                # Step 1: 获取access_token
-                logger.info(f"获取access_token...")
-                access_token = await self.get_new_access_token(outlook_refresh_token, client_id)
-                if not access_token:
-                    logger.error("获取access_token失败")
-                    continue
-
-                # Step 2: 发送登录请求
+                # Step 1: 发送登录请求
                 logger.info(f"发送登录请求: {email}")
                 signin_result = await self.send_email_signin_request(email, proxy)
 
@@ -2657,32 +2599,30 @@ class WarpRegistrationBot:
                         logger.error(f"发送登录请求失败: {signin_result.get('error')}")
                         continue
 
-                # Step 3: 等待验证邮件
+                # Step 2: 等待验证邮件
                 logger.info("等待验证邮件...")
                 await asyncio.sleep(5)
 
-                email_result = await self.wait_for_verification_email(
-                    access_token=access_token,
-                    email=email,
-                    client_id=client_id,
-                    refresh_token=outlook_refresh_token,
+                verification_result = await self.wait_for_verification_email(
+                    temp_mail_client=temp_mail_client,
+                    email=email
                 )
 
-                if not email_result:
+                if not verification_result:
                     logger.error("未收到验证邮件")
                     continue
 
-                oob_code = email_result.get('oob_code')
+                oob_code = verification_result.get('oob_code')
                 if not oob_code:
                     logger.error("未能提取验证码")
                     continue
 
-                verification_link = email_result.get('verification_link')
+                verification_link = verification_result.get('verification_link')
                 if not verification_link:
                     logger.error("未能提取验证链接")
                     continue
 
-                # Step 4: 完成登录
+                # Step 3: 完成登录
                 logger.info("完成登录...")
                 complete_result = await self.complete_email_signin(email, oob_code)
 
@@ -2694,7 +2634,7 @@ class WarpRegistrationBot:
                         logger.error(f"完成登录失败: {complete_result.get('error')}")
                         continue
 
-                # Step 5: 激活Warp用户
+                # Step 4: 激活Warp用户
                 logger.info("激活Warp用户...")
                 activation_result = await self.activate_warp_user(complete_result["id_token"], session_id)
 
@@ -2704,15 +2644,12 @@ class WarpRegistrationBot:
 
                 request_limit_result = await self._get_request_limit(complete_result["id_token"])
 
-                # Step 6: 保存到数据库
+                # Step 5: 保存到数据库
                 await self.db_manager.add_account(
                     email=email,
-                    email_password=email_password,
                     local_id=complete_result["local_id"],
                     id_token=complete_result["id_token"],
                     refresh_token=complete_result["refresh_token"],
-                    client_id=client_id,
-                    outlook_refresh_token=outlook_refresh_token,
                     status='active',
                     proxy_info=proxy_str,
                     user_agent=self.user_agent
@@ -3060,29 +2997,8 @@ class RegistrationMonitor:
             "failed": 0
         }
         self.stats_lock = asyncio.Lock()
-        self.outlook_client = OutlookAPIClient(
-            config.OUTLOOK_API_CONFIG["app_id"],
-            config.OUTLOOK_API_CONFIG["app_key"]
-        )
 
-    async def buy_outlook_email(self) -> Optional[Dict]:
-        """购买Outlook邮箱"""
-        result = await self.outlook_client.get_email(config.OUTLOOK_API_CONFIG["commodity_id"], 1)
 
-        if result.get('code') == 200 and result.get('data'):
-            cards = result['data'].get('cards', [])
-            if cards:
-                card_info = cards[0]
-                parts = card_info.split('----')
-                if len(parts) >= 4:
-                    return {
-                        'email': parts[0],
-                        'email_password': parts[1],
-                        'client_id': parts[2],
-                        'refresh_token': parts[3]
-                    }
-
-        return None
 
     async def registration_worker(self, worker_id: int):
         """异步注册工作函数"""
@@ -3097,35 +3013,27 @@ class RegistrationMonitor:
                     await asyncio.sleep(30)
                     continue
 
-                # 购买邮箱
-                logger.info(f"[Worker-{worker_id}] 购买邮箱...")
-                email_info = await self.buy_outlook_email()
-
-                if not email_info:
-                    logger.error(f"[Worker-{worker_id}] 购买邮箱失败")
-                    async with self.stats_lock:
-                        self.stats["failed"] += 1
-                    await asyncio.sleep(30)
-                    continue
-
-                logger.info(f"[Worker-{worker_id}] 成功购买邮箱: {email_info['email']}")
-
-                # 创建注册机器人并执行注册
-                bot = WarpRegistrationBot(self.db_manager, self.proxy_manager)
-                local_id = await bot.register_account(email_info)
+                # 创建临时邮箱客户端
+                temp_mail_client = TempMailAPIClient()
+                async with temp_mail_client:
+                    # 创建注册机器人并执行注册
+                    bot = WarpRegistrationBot(self.db_manager, self.proxy_manager)
+                    local_id = await bot.register_account(temp_mail_client)
+                    
+                    email = temp_mail_client.current_email or "unknown"
 
                 async with self.stats_lock:
                     self.stats["total_attempts"] += 1
+                    if local_id:
+                        self.stats["successful"] += 1
+                    else:
+                        self.stats["failed"] += 1
 
                 if local_id:
-                    async with self.stats_lock:
-                        self.stats["successful"] += 1
-                    logger.info(f"[Worker-{worker_id}] ✅ 注册成功: {email_info['email']}")
+                    logger.info(f"[Worker-{worker_id}] ✅ 注册成功: {email}")
                     await asyncio.sleep(5)
                 else:
-                    async with self.stats_lock:
-                        self.stats["failed"] += 1
-                    logger.error(f"[Worker-{worker_id}] ❌ 注册失败: {email_info['email']}")
+                    logger.error(f"[Worker-{worker_id}] ❌ 注册失败: {email}")
                     await asyncio.sleep(30)
 
             except Exception as e:
@@ -3162,10 +3070,6 @@ class RegistrationMonitor:
 
     async def start(self):
         """启动监控器"""
-
-        # 初始化Outlook客户端
-        await self.outlook_client._ensure_client()
-
         self.running = True
 
         # 创建工作任务
@@ -3186,7 +3090,6 @@ class RegistrationMonitor:
             logger.info("⌨️ 收到停止信号")
         finally:
             self.running = False
-            await self.outlook_client.close()
 
 
 # ==================== 主函数 ====================
