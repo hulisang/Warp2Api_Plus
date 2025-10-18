@@ -137,9 +137,13 @@ def run_warp_register():
 SERVICES = {
     "server": run_server,
     "openai": run_openai_compat,
-    "pool_service": run_pool_service,
     "pool_maintenance": run_pool_maintenance,
     "register": run_warp_register,
+}
+
+# 独立服务（仅用于调试，不在"all"模式中启动）
+STANDALONE_SERVICES = {
+    "pool_service": run_pool_service,  # 账号池已集成到server，独立运行仅用于调试
 }
 
 
@@ -190,17 +194,38 @@ def start_all_services():
 def print_usage():
     """打印使用说明"""
     print("=" * 60)
-    print("Warp 服务统一启动器")
+    print("Warp 服务统一启动器 (优化版)")
     print("=" * 60)
     print("用法:")
     print("  python main.py [命令]")
-    print("\n可用命令:")
-    print("  all                - 启动所有服务")
+    print("\n🚀 主要命令:")
+    print("  all                - 启动所有服务 (推荐)")
+    print("")
+    print("📋 核心服务:")
     for name in SERVICES:
-        print(f"  {name:<18} - 仅启动 {name} 服务 (用于调试)")
-    print("\n示例:")
-    print("  python main.py all")
-    print("  python main.py server")
+        desc = {
+            "server": "Protobuf主服务+账号池 (8000端口)",
+            "openai": "OpenAI兼容接口 (8010端口)", 
+            "pool_maintenance": "账号池维护脚本",
+            "register": "Warp账号注册脚本"
+        }.get(name, f"{name} 服务")
+        print(f"  {name:<18} - {desc}")
+    print("")
+    print("🔧 调试服务:")
+    for name in STANDALONE_SERVICES:
+        desc = {
+            "pool_service": "独立账号池服务 (8019端口，仅调试用)"
+        }.get(name, f"{name} 服务")
+        print(f"  {name:<18} - {desc}")
+    print("")
+    print("💡 优化说明:")
+    print("  - 账号池功能已集成到8000端口，无需独立运行")
+    print("  - 'all'模式不再启动独立的pool_service避免冲突")
+    print("")
+    print("示例:")
+    print("  python main.py all         # 启动优化后的服务")
+    print("  python main.py server      # 仅启动主服务(含账号池)")
+    print("  python main.py pool_service # 调试模式：独立账号池服务")
     print("=" * 60)
 
 
@@ -217,8 +242,11 @@ if __name__ == "__main__":
     if command == "all":
         start_all_services()
     elif command in SERVICES:
-        logger.info(f"以调试模式启动单个服务: '{command}'")
+        logger.info(f"以调试模式启动核心服务: '{command}'")
         SERVICES[command]()
+    elif command in STANDALONE_SERVICES:
+        logger.info(f"以调试模式启动独立服务: '{command}'")
+        STANDALONE_SERVICES[command]()
     else:
         print(f"错误: 未知命令 '{command}'\n")
         print_usage()

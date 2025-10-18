@@ -34,14 +34,20 @@ class AsyncProxyManager:
             return None
 
         try:
-            if '@' in proxy_str:
-                credentials, host_port = proxy_str.split('@')
-                user, password = credentials.split(':')
-                host, port = host_port.split(':')
-                # httpx使用socks5代理格式
+            s = proxy_str.strip()
+            # 若已包含协议前缀，直接返回（http/https/socks5/socks4）
+            if s.startswith(("http://", "https://", "socks5://", "socks4://")):
+                return s
+
+            # 处理带鉴权的 host:port 形式，例如 user:pass@host:port
+            if "@" in s:
+                credentials, host_port = s.split("@", 1)
+                user, password = credentials.split(":", 1)
+                host, port = host_port.rsplit(":", 1)
                 return f"socks5://{user}:{password}@{host}:{port}"
             else:
-                host, port = proxy_str.split(':')
+                # 普通 host:port，使用从右侧分割一次，避免 IPv6/额外冒号导致拆包错误
+                host, port = s.rsplit(":", 1)
                 return f"socks5://{host}:{port}"
         except Exception as e:
             logger.error(f"格式化代理失败: {e}")

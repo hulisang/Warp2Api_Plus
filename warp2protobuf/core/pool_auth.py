@@ -17,7 +17,9 @@ from .logging import logger
 from .proxy_manager import AsyncProxyManager
 
 # 账号池服务配置
-POOL_SERVICE_URL = os.getenv("POOL_SERVICE_URL", "http://localhost:8019")
+# 注意：此处仅为基础地址；实际请求会在后面拼接 /api/accounts/allocate 等路径
+# 主服务集成情况下应为 http://localhost:8000；独立池服务为 http://localhost:8019
+POOL_SERVICE_URL = os.getenv("POOL_SERVICE_URL", "http://localhost:8000")
 USE_POOL_SERVICE = os.getenv("USE_POOL_SERVICE", "true").lower() == "true"
 
 

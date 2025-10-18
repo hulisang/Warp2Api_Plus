@@ -6,7 +6,7 @@
 class PoolManager {
     constructor() {
         // API端点配置（通过server.py代理转发）
-        this.poolApiBase = '/api/pool';
+        this.poolApiBase = '/api';
         
         // 数据缓存
         this.accounts = [];
@@ -374,6 +374,9 @@ class PoolManager {
                         标记封禁
                     </button>
                 ` : ''}
+                <button class="action-btn danger" onclick="poolManager.deleteAccount('${account.email}')" title="删除账号">
+                    🗑️ 删除
+                </button>
                 <button class="action-btn" onclick="poolManager.showAccountDetail('${account.email}')">
                     查看详情
                 </button>
@@ -381,6 +384,34 @@ class PoolManager {
         `;
         
         return card;
+    }
+
+    /**
+     * 删除账号（硬删除）
+     */
+    async deleteAccount(email) {
+        if (!confirm(`确定要永久删除账号 ${email} 吗？该操作不可恢复。`)) {
+            return;
+        }
+        try {
+            this.showNotification(`正在删除 ${email}...`, 'info');
+            const response = await fetch(`${this.poolApiBase}/accounts/delete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email })
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            this.showNotification(`删除成功：${email}`, 'success');
+            // 刷新列表
+            await this.filterAndRenderAccounts();
+        } catch (e) {
+            console.error('删除账号失败:', e);
+            this.showNotification(`删除失败: ${e.message}`, 'error');
+        }
     }
     
     /**
@@ -536,6 +567,12 @@ class PoolManager {
                 <div class="info-label">Local ID</div>
                 <div class="info-value">${account.local_id || 'N/A'}</div>
             </div>
+            ${account.refresh_token ? `
+            <div class="info-item">
+                <div class="info-label">Refresh Token</div>
+                <div class="info-value" style="word-break: break-all; font-family: monospace;">${account.refresh_token}</div>
+            </div>
+            ` : ''}
             <div class="info-item">
                 <div class="info-label">状态</div>
                 <div class="info-value">${account.status}</div>

@@ -31,6 +31,9 @@ from warp2protobuf.core.auth import acquire_anonymous_access_token
 from warp2protobuf.core.pool_auth import acquire_pool_or_anonymous_token, release_pool_session, get_current_account_info
 from warp2protobuf.config.models import get_all_unique_models
 
+# 导入账号池路由器和初始化函数
+from pool_service import pool_router, init_pool_manager, start_periodic_tasks
+
 
 # ============= 工具：input_schema 清理与校验 =============
 def _is_empty_value(value: Any) -> bool:
@@ -200,6 +203,10 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动任务
     await startup_tasks()
+    # 初始化账号池管理器
+    await init_pool_manager()
+    # 启动账号池定期任务
+    await start_periodic_tasks()
     yield
     # 清理任务
     logger.info("服务器正在关闭...")
@@ -264,97 +271,18 @@ def create_app() -> FastAPI:
     # 将protobuf_app的路由包含进来（使用include_router而不是mount避免路径冲突）
     # 注意：protobuf_app是FastAPI实例，需要通过router或重新定义路由
     # 这里暂时保持mount方式，但确保WebSocket等关键路由在主app中定义
-    # 从protobuf_app导入WebSocket管理器和路由
-    from warp2protobuf.api.protobuf_routes import manager as ws_manager, app as proto_app
-    from fastapi import WebSocket, WebSocketDisconnect
+    # WebSocket端点已在protobuf_app中定义，无需重复
+    # protobuf_app的 /ws 端点会被mount到主应用
     
-    # 在主app中注册WebSocket路由
-    @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket):
-        """WebSocket实时监控端点"""
-        await ws_manager.connect(websocket)
-        try:
-            await websocket.send_json({
-                "event": "connected",
-                "message": "WebSocket连接已建立",
-                "timestamp": datetime.now().isoformat()
-            })
-            # 发送最近的数据包历史
-            recent_packets = ws_manager.packet_history[-10:]
-            for packet in recent_packets:
-                await websocket.send_json({"event": "packet_history", "packet": packet})
-            # 保持连接
-            while True:
-                data = await websocket.receive_text()
-                logger.debug(f"收到WebSocket消息: {data}")
-        except WebSocketDisconnect:
-            ws_manager.disconnect(websocket)
-        except Exception as e:
-            logger.error(f"WebSocket错误: {e}")
-            ws_manager.disconnect(websocket)
-    
-    # 添加账号池API代理转发（避免跨域问题）
-    import httpx
-    import config
-    
-    @app.api_route("/api/pool/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    async def proxy_pool_api(path: str, request: Request):
-        """代理转发账号池API请求"""
-        pool_url = f"http://localhost:{config.POOL_SERVICE_PORT}/api/{path}"
-
-        # 获取请求体
-        body = await request.body()
-
-        # 过滤不安全或会干扰转发的请求头
-        incoming_headers = dict(request.headers)
-        hop_by_hop_headers = {
-            "host",
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailer",
-            "transfer-encoding",
-            "upgrade",
-            "content-length",
-            "accept-encoding",
-        }
-        forward_headers = {
-            k: v for k, v in incoming_headers.items() if k.lower() not in hop_by_hop_headers
-        }
-
-        logger.info(f"➡️ 转发 {request.method} /api/pool/{path} -> {pool_url}")
-
-        # 转发请求
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.request(
-                    method=request.method,
-                    url=pool_url,
-                    content=body if body else None,
-                    headers=forward_headers,
-                    params=dict(request.query_params),
-                    timeout=30.0,
-                )
-
-                # 过滤返回头部中的hop-by-hop字段
-                response_headers = {
-                    k: v for k, v in response.headers.items() if k.lower() not in hop_by_hop_headers
-                }
-
-                return Response(
-                    content=response.content,
-                    status_code=response.status_code,
-                    headers=response_headers,
-                    media_type=response.headers.get("content-type")
-                )
-            except Exception as e:
-                logger.error(f"账号池API代理失败: {e}")
-                raise HTTPException(status_code=503, detail=f"Pool service unavailable: {str(e)}")
+    # 包含账号池路由器（添加前缀以匹配前端调用路径）
+    # 注意：include_router的优先级高于mount，所以账号池路由不会被覆盖
+    app.include_router(pool_router, prefix="/api")
     
     # 将protobuf路由包含到主应用中
+    # mount到根路径，已注册的路由（/ws, /api/*）优先级更高
     app.mount("/", protobuf_app)
+
+    
 
     # ============= 返回protobuf编码后的AI请求字节 =============
     @app.post("/api/warp/encode_raw")

@@ -363,6 +363,46 @@ async def get_user_id_endpoint():
         raise HTTPException(500, f"获取User ID失败: {e}")
 
 
+@app.get("/v1/models")
+@app.get("/api/v1/models")
+async def list_warp_models(use_cache: bool = Query(True, description="是否使用缓存")):
+    """
+    获取 Warp 可用模型列表（OpenAI 兼容格式）
+    
+    从 Warp GraphQL API 实时获取模型列表，带缓存机制（1小时）
+    """
+    try:
+        from ..config.models import get_models_from_warp_api, get_all_unique_models
+        
+        # 尝试从账号池获取 JWT
+        jwt_token = None
+        try:
+            jwt_token = await get_valid_jwt()
+        except Exception:
+            # 如果获取失败，返回硬编码列表
+            logger.warning("无法获取有效JWT，使用硬编码模型列表")
+            models = get_all_unique_models()
+            return {"object": "list", "data": models}
+        
+        if not jwt_token:
+            logger.warning("JWT为空，使用硬编码模型列表")
+            models = get_all_unique_models()
+            return {"object": "list", "data": models}
+        
+        # 从 Warp API 获取模型列表
+        models = await get_models_from_warp_api(jwt_token, use_cache=use_cache)
+        
+        logger.info(f"返回 {len(models)} 个模型")
+        return {"object": "list", "data": models}
+        
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
+        # 失败时返回硬编码列表
+        from ..config.models import get_all_unique_models
+        models = get_all_unique_models()
+        return {"object": "list", "data": models}
+
+
 @app.get("/api/packets/history")
 async def get_packet_history(limit: int = 50):
     try:
@@ -463,11 +503,23 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
         actual_data = request.get_data()
         if not actual_data:
             raise HTTPException(400, "数据包不能为空")
+        
+        # 记录请求的模型信息
+        try:
+            model_base = actual_data.get("settings", {}).get("model_config", {}).get("base", "未指定")
+            logger.info(f"[模型追踪] Bridge 收到请求，模型: {model_base}")
+        except Exception:
+            pass
+        
         wrapped = {"json_data": actual_data}
         wrapped = sanitize_mcp_input_schema_in_packet(wrapped)
         actual_data = wrapped.get("json_data", actual_data)
         actual_data = _encode_smd_inplace(actual_data)
         protobuf_bytes = dict_to_protobuf_bytes(actual_data, request.message_type)
+
+        # 为本次SSE会话生成唯一ID，用于WebSocket实时展示
+        import uuid  # 局部引入以避免影响全局
+        stream_id = f"sse-{uuid.uuid4()}"
 
         async def _agen():
             # 创建代理管理器实例
@@ -506,6 +558,8 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
             jwt = None
             successful = False
             last_error = None
+
+            # 不再在开始/分片阶段广播，改为仅在完成时广播一次汇总
 
             for attempt in range(max_attempts):
                 if attempt > 0:
@@ -655,6 +709,10 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
                                 current_data = ""
                                 event_no = 0
                                 has_events = False
+                                # 聚合本次流式的事件与统计
+                                aggregated_events: List[Dict[str, Any]] = []
+                                event_type_counts: Dict[str, int] = {}
+                                total_event_bytes = 0
 
                                 async for line in response.aiter_lines():
                                     if line.startswith("data:"):
@@ -712,6 +770,24 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
                                             logger.error(f"无法将事件数据转换为JSON: {out}")
                                             continue
 
+                                        # 聚合：记录事件详情与统计
+                                        try:
+                                            total_event_bytes += len(raw_bytes) if isinstance(raw_bytes, (bytes, bytearray)) else 0
+                                        except Exception:
+                                            pass
+                                        try:
+                                            event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
+                                        except Exception:
+                                            pass
+                                        try:
+                                            aggregated_events.append({
+                                                "index": event_no - 1,
+                                                "type": event_type,
+                                                "data": event_data
+                                            })
+                                        except Exception:
+                                            pass
+
                                         yield f"data: {chunk}\n\n"
 
                                 # 检查是否成功接收到事件
@@ -728,6 +804,23 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
                                     except Exception:
                                         pass
 
+                                    # 广播：仅在完成时发送一次汇总事件，包含本次所有事件的聚合
+                                    try:
+                                        await manager.broadcast({
+                                            "event": "stream_completed",
+                                            "stream_id": stream_id,
+                                            "result": {
+                                                "event_count": event_no,
+                                                "successful": True,
+                                                "timestamp": datetime.now().isoformat(),
+                                                "total_event_bytes": total_event_bytes,
+                                                "event_type_counts": event_type_counts,
+                                                "events": aggregated_events
+                                            }
+                                        })
+                                    except Exception:
+                                        pass
+
                                     yield "data: [DONE]\n\n"
                                     return  # 成功完成，直接返回
                                 else:
@@ -735,6 +828,23 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
                                     logger.warning(
                                         f"未收到任何事件，视为失败 (attempt {attempt + 1}/{max_attempts}, proxy {proxy_attempt + 1}/{max_proxy_retries})")
                                     last_error = "No events received"
+                                    # 广播：失败也仅汇总一次（含已收集到的事件）
+                                    try:
+                                        await manager.broadcast({
+                                            "event": "stream_completed",
+                                            "stream_id": stream_id,
+                                            "result": {
+                                                "event_count": event_no,
+                                                "successful": False,
+                                                "error": "No events received",
+                                                "timestamp": datetime.now().isoformat(),
+                                                "total_event_bytes": total_event_bytes,
+                                                "event_type_counts": event_type_counts,
+                                                "events": aggregated_events
+                                            }
+                                        })
+                                    except Exception:
+                                        pass
                                     if proxy_attempt < max_proxy_retries - 1:
                                         continue
 
@@ -784,6 +894,23 @@ async def send_to_warp_api_stream_sse(request: EncodeRequest):
 
             # 所有尝试都失败了
             logger.error(f"SSE端点在 {max_attempts} 轮尝试（每轮 {max_proxy_retries} 个代理）后完全失败")
+            # 广播：最终失败（仅一次汇总，含已收集到的事件）
+            try:
+                await manager.broadcast({
+                    "event": "stream_completed",
+                    "stream_id": stream_id,
+                    "result": {
+                        "event_count": 0,
+                        "successful": False,
+                        "error": f"All attempts failed. Last error: {last_error}",
+                        "timestamp": datetime.now().isoformat(),
+                        "total_event_bytes": 0,
+                        "event_type_counts": {},
+                        "events": []
+                    }
+                })
+            except Exception:
+                pass
             yield f"data: {{\"error\": \"All {max_attempts} attempts failed. Last error: {last_error}\"}}\n\n"
             yield "data: [DONE]\n\n"
             return

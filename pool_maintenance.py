@@ -13,6 +13,8 @@ import base64
 import traceback
 
 import requests
+import os
+from typing import Union
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
@@ -178,6 +180,25 @@ class TokenRefreshService:
     def __init__(self, firebase_api_key: str = config.FIREBASE_API_KEY):
         self.firebase_api_key = firebase_api_key
         self.base_url = "https://securetoken.googleapis.com/v1/token"
+        # 代理（如配置）
+        self.proxies = None
+        if getattr(config, 'PROXY_URL', None):
+            self.proxies = {
+                'http': config.PROXY_URL,
+                'https': config.PROXY_URL
+            }
+            logger.info(f"🌐 使用代理: {config.PROXY_URL}")
+
+        # TLS 验证：支持关闭或使用自定义 CA Bundle
+        # 优先环境变量 REQUESTS_CA_BUNDLE，其次 config.CA_BUNDLE_PATH，其次 config.SSL_NO_VERIFY
+        self.verify: Union[bool, str] = True
+        ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') or getattr(config, 'CA_BUNDLE_PATH', None)
+        if ca_bundle:
+            self.verify = ca_bundle
+            logger.info(f"🔐 使用自定义CA证书: {ca_bundle}")
+        elif getattr(config, 'SSL_NO_VERIFY', False):
+            self.verify = False
+            logger.warning("⚠️ 已禁用TLS证书校验 (仅用于调试)")
 
     def is_token_expired(self, id_token: str, buffer_minutes: int = 5) -> bool:
         """检查JWT token是否过期"""
@@ -242,8 +263,13 @@ class TokenRefreshService:
             response = requests.post(
                 url,
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "warp-pool-maintenance/1.0"
+                },
                 timeout=30,
+                proxies=self.proxies,
+                verify=self.verify,
             )
 
             if response.ok:

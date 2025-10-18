@@ -6,7 +6,7 @@
 
 # ==================== 临时邮箱API配置 ====================
 # 临时邮箱API服务地址（新版本使用）
-TEMP_MAIL_BASE_URL = ""
+TEMP_MAIL_BASE_URL = "https://mail.chatgpt.org.uk/api"
 
 
 # ==================== 代理配置 ====================
@@ -35,7 +35,7 @@ POOL_SERVICE_PORT = 8019
 MAX_SESSION_DURATION = 30 * 60  # 会话最大持续时间（30分钟）
 
 # ==================== 账号注册 (warp_register.py) ====================
-TARGET_ACCOUNTS = 100  # 目标账号数
+TARGET_ACCOUNTS = 5  # 目标账号数
 MAX_CONCURRENT_REGISTER = 1  # 最大并发注册数
 MAX_PROXY_RETRIES = 5  # 代理重试次数
 

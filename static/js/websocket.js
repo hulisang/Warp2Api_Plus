@@ -175,10 +175,25 @@ class WebSocketManager {
      * 添加流式事件
      */
     addStreamEvent(type, data) {
+        // 计算事件大小：优先使用聚合结果中的 total_event_bytes，其次使用分片大小
+        let sizeBytes = 0;
+        try {
+            if (type === 'completed' && data && data.result && typeof data.result.total_event_bytes === 'number') {
+                sizeBytes = data.result.total_event_bytes;
+            } else if (type === 'chunk_parsed' && data && data.chunk && typeof data.chunk.size === 'number') {
+                sizeBytes = data.chunk.size;
+            }
+        } catch (_) {}
+
+        // 选择更贴切的时间戳
+        const ts = (data && data.timestamp)
+            || (data && data.result && data.result.timestamp)
+            || new Date().toISOString();
+
         const eventPacket = {
-            timestamp: data.timestamp || new Date().toISOString(),
+            timestamp: ts,
             type: `stream_${type}`,
-            size: 0,
+            size: sizeBytes,
             data_preview: `流式处理事件: ${type}`,
             full_data: data
         };

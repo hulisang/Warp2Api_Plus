@@ -59,6 +59,10 @@ class AddAccountFromLinkRequest(BaseModel):
 class RefreshCreditsRequest(BaseModel):
     email: Optional[str] = None  # 为空则刷新所有账号
 
+
+class DeleteAccountRequest(BaseModel):
+    email: str
+
 # ==================== Credits查询服务 ====================
 class WarpCreditsService:
     """Warp账号Credits查询服务"""
@@ -601,6 +605,49 @@ class AccountPoolManager:
         except Exception as e:
             logger.error(f"清理会话失败: {e}")
     
+    async def delete_account(self, email: str) -> Dict[str, Any]:
+        """硬删除账号：
+        - 若被锁定，先从锁与会话中移除；会话无账号后自动移除
+        - 从数据库删除账号记录
+        - 从缓存移除
+        """
+        try:
+            # 如果账号被锁定，先解除与会话的关系
+            if email in self.locked_accounts:
+                session_id = self.locked_accounts[email]
+                try:
+                    del self.locked_accounts[email]
+                except Exception:
+                    pass
+                if session_id in self.sessions:
+                    session_info = self.sessions[session_id]
+                    session_info['accounts'] = [a for a in session_info['accounts'] if a.get('email') != email]
+                    # 若会话已无账号，则结束会话
+                    if len(session_info['accounts']) == 0:
+                        try:
+                            del self.sessions[session_id]
+                        except Exception:
+                            pass
+
+            # 从数据库删除
+            async with aiosqlite.connect(self.db_path, timeout=config.DB_TIMEOUT) as db:
+                cursor = await db.execute('SELECT COUNT(1) FROM accounts WHERE email = ?', (email,))
+                exists = (await cursor.fetchone())[0] > 0
+                if not exists:
+                    return {"success": False, "message": "Account not found"}
+
+                await db.execute('DELETE FROM accounts WHERE email = ?', (email,))
+                await db.commit()
+
+            # 从缓存移除
+            self.account_cache = [a for a in self.account_cache if a.get('email') != email]
+
+            logger.warning(f"🗑️ 已删除账号: {email}")
+            return {"success": True, "message": f"Account {email} deleted"}
+        except Exception as e:
+            logger.error(f"删除账号失败 {email}: {e}")
+            return {"success": False, "message": str(e)}
+    
     async def update_account_credits(self, email: str, credits_data: Dict[str, Any]) -> bool:
         """更新账号credits信息到数据库"""
         try:
@@ -680,9 +727,11 @@ class AccountPoolManager:
                         logger.warning(f"⚠️ 第一次尝试失败 {acc_email}: {error_msg}")
                         
                         # 判断是否是认证错误（放宽匹配条件）
+                        # 放宽认证错误识别，包含常见HTTP码与关键字
                         is_auth_error = any(keyword in error_msg for keyword in [
-                            'Unauthorized', 'User not in context', 'Not found', 
-                            'Authentication', 'Invalid token', 'Token expired'
+                            'Unauthorized', 'User not in context', 'Not found',
+                            'Authentication', 'Invalid token', 'Token expired',
+                            'HTTP 401', 'HTTP 403', '401', '403', 'Forbidden', 'Unauthenticated'
                         ])
                         
                         if is_auth_error:
@@ -756,59 +805,65 @@ class AccountPoolManager:
             return {"success": False, "message": str(e)}
 
 
-# ==================== FastAPI应用 ====================
-app = FastAPI(title="Warp账号池服务", version="2.0.0")
+# ==================== 路由器和应用创建 ====================
+from fastapi import APIRouter
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 创建路由器用于导出
+pool_router = APIRouter()
 
 # 全局管理器实例
 pool_manager = None
 
+# 定期任务控制
+periodic_task_handle = None
 
-@app.on_event("startup")
-async def startup_event():
-    """启动事件"""
+
+async def init_pool_manager():
+    """初始化账号池管理器"""
     global pool_manager
+    if pool_manager is None:
+        logger.info("初始化账号池管理器...")
+        pool_manager = AccountPoolManager()
+        await pool_manager.init_async()
+        logger.info("账号池管理器已初始化")
+    return pool_manager
 
-    logger.info("账号池服务启动中...")
 
-    # 初始化管理器
-    pool_manager = AccountPoolManager()
-    await pool_manager.init_async()
-
-    logger.info("账号池服务已启动")
-
-    # 启动定期任务
+async def start_periodic_tasks():
+    """启动定期任务"""
+    global periodic_task_handle
+    if periodic_task_handle is not None:
+        return  # 已经启动
+    
     async def periodic_tasks():
         credits_refresh_counter = 0  # credits刷新计数器
         
         while True:
             await asyncio.sleep(60)  # 每分钟执行一次
             try:
-                # 清理过期会话
-                await pool_manager.cleanup_expired_sessions()
-                # 刷新缓存
-                await pool_manager.refresh_account_cache()
-                
-                # 每30分钟刷新一次credits
-                credits_refresh_counter += 1
-                if credits_refresh_counter >= 30:
-                    logger.info("开始定时刷新账号credits...")
-                    asyncio.create_task(pool_manager.refresh_credits())  # 异步执行，不阻塞
-                    credits_refresh_counter = 0
+                if pool_manager:
+                    # 清理过期会话
+                    await pool_manager.cleanup_expired_sessions()
+                    # 刷新缓存
+                    await pool_manager.refresh_account_cache()
+                    
+                    # 每30分钟刷新一次credits
+                    credits_refresh_counter += 1
+                    if credits_refresh_counter >= 30:
+                        logger.info("开始定时刷新账号credits...")
+                        asyncio.create_task(pool_manager.refresh_credits())  # 异步执行，不阻塞
+                        credits_refresh_counter = 0
             except Exception as e:
                 logger.error(f"定期任务执行失败: {e}")
 
-    asyncio.create_task(periodic_tasks())
+    periodic_task_handle = asyncio.create_task(periodic_tasks())
+    logger.info("账号池定期任务已启动")
 
 
-@app.get("/")
+# ==================== 路由定义（使用router而非app）====================
+
+
+@pool_router.get("/")
 async def root():
     """根路径"""
     return {
@@ -819,7 +874,7 @@ async def root():
     }
 
 
-@app.post("/api/accounts/allocate")
+@pool_router.post("/accounts/allocate")
 async def allocate_accounts(request: AllocateRequest):
     """分配账号"""
     try:
@@ -838,7 +893,7 @@ async def allocate_accounts(request: AllocateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/accounts/release")
+@pool_router.post("/accounts/release")
 async def release_accounts(request: ReleaseRequest):
     """释放账号"""
     try:
@@ -852,7 +907,7 @@ async def release_accounts(request: ReleaseRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/accounts/mark_blocked")
+@pool_router.post("/accounts/mark_blocked")
 async def mark_account_blocked(request: BlockAccountRequest):
     """标记账号为已封禁"""
     try:
@@ -877,7 +932,7 @@ async def mark_account_blocked(request: BlockAccountRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/status")
+@pool_router.get("/status")
 async def get_status():
     """获取池状态"""
     try:
@@ -891,7 +946,7 @@ async def get_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/accounts/list")
+@pool_router.get("/accounts/list")
 async def list_accounts(
     status: Optional[str] = None,
     limit: int = 100,
@@ -928,6 +983,7 @@ async def list_accounts(
                     email,
                     local_id,
                     status,
+                    refresh_token,
                     last_used,
                     created_at,
                     proxy_info,
@@ -973,7 +1029,7 @@ async def list_accounts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/health")
+@pool_router.get("/health")
 async def health_check():
     """健康检查"""
     return {
@@ -984,7 +1040,7 @@ async def health_check():
     }
 
 
-@app.post("/api/accounts/refresh_credits")
+@pool_router.post("/accounts/refresh_credits")
 async def refresh_credits(request: RefreshCreditsRequest):
     """刷新账号credits"""
     try:
@@ -1005,7 +1061,7 @@ async def refresh_credits(request: RefreshCreditsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/accounts/add_from_link")
+@pool_router.post("/accounts/add_from_link")
 async def add_account_from_link(request: AddAccountFromLinkRequest):
     """从登录链接智能添加账号（支持邮箱链接和客户端重定向链接）"""
     try:
@@ -1126,6 +1182,55 @@ async def add_account_from_link(request: AddAccountFromLinkRequest):
     except Exception as e:
         logger.error(f"添加账号失败: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@pool_router.post("/accounts/delete")
+async def delete_account(request: DeleteAccountRequest):
+    """硬删除账号"""
+    try:
+        if not pool_manager:
+            raise HTTPException(status_code=503, detail="Service initializing")
+
+        result = await pool_manager.delete_account(request.email)
+        if not result.get('success'):
+            raise HTTPException(status_code=404, detail=result.get('message', 'Account not found'))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除账号失败: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 独立应用创建（保持独立运行能力）====================
+def create_pool_app():
+    """创建独立的账号池FastAPI应用"""
+    app = FastAPI(title="Warp账号池服务", version="2.0.0")
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # 包含路由器
+    app.include_router(pool_router)
+    
+    # 启动事件
+    @app.on_event("startup")
+    async def startup_event():
+        """启动事件"""
+        logger.info("账号池服务启动中...")
+        await init_pool_manager()
+        await start_periodic_tasks()
+        logger.info("账号池服务已启动")
+    
+    return app
+
+# 创建默认应用实例（用于独立运行）
+app = create_pool_app()
 
 
 # ==================== 主函数 ====================
